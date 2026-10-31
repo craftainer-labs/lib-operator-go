@@ -364,7 +364,6 @@ Includes `ServerCommon`. Admin Secret keys: `username`, `password`.
 | `host` | string | yes | | maxLength 253 |
 | `port` | int32 | no | `6379` | 1 to 65535 |
 | `mode` | enum | no | `Standalone` | `Standalone` (ACLs are per node, so Cluster and Sentinel are out of `v1alpha1`) |
-| `tls.enabled` | bool | no | `true` | `false` is allowed only for a namespaced `CacheServer` (CEL on the kind); a cluster server must use TLS |
 
 Cluster kind also takes `allowedNamespaces`. Status: `ServerStatus`.
 

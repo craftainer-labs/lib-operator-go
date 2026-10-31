@@ -216,8 +216,10 @@ The Secret is written by `binding.WriteSecret(ctx, c, owner, name, typ,
 provider, data)`:
 
 - `type: servicebinding.io/<typ>` where `<typ>` is the binding type. The
-  `data` always holds `type` (= `<typ>`) and `provider` (= `craftainer.dev`),
-  as the [Service Binding spec] requires, plus the type's keys below.
+  `data` always holds `type` (= `<typ>`) and `provider` (= `craftainer.dev`).
+  The [Service Binding spec] (core 1.1.0) says a Provisioned Service Secret
+  SHOULD hold `type` and RECOMMENDS `provider`; we always write both. The
+  type's keys follow below.
 - Secrets are owned by the claim (controller owner reference, so a `Delete`
   cascades) and carry `app.kubernetes.io/managed-by: <operator>` and the
   label `craftainer.dev/claim: <claim name>`. The operator's Secret cache is
@@ -225,9 +227,14 @@ provider, data)`:
   it does not own (EB-2).
 - `WriteSecret` refuses to overwrite a Secret that exists without the claim as
   owner (`NameCollision`), so a claim cannot take over a user's Secret.
-- Types: `postgresql`, `redis` (Valkey and Redis; the spec has no `valkey`),
-  and `s3`, `mqtt`, `oidc` (not in the spec's well-known list; they follow
-  the spec's rules and use these craftainer-defined keys).
+- Types: `postgresql`, `redis` (Valkey and Redis), `s3`, `mqtt`, `oidc`. Core
+  1.1.0 defines no per-type key lists: it reserves only `host`, `port`, `uri`,
+  `username`, `password`, `certificates` and `private-key` (with stated value
+  requirements) and `type`/`provider`. The type names and every other key
+  below (`database`, `sslmode`, `sslrootcert`, ...) are craftainer
+  conventions; `postgresql` and `redis` reuse the names common to Service
+  Binding implementations. Where a reserved name applies we use it with the
+  spec's meaning (`host`, `port`, `uri`, `username`, `password`).
 
 | Type | Keys |
 | --- | --- |
@@ -304,7 +311,7 @@ The framework drives a small state machine from `status.rotation`
 4. **Finish.** At `retireAfter`, call `RotateFinish`, then clear `previous`
    and `retireAfter`. A new rotation is not begun while `previous` is set.
 
-`rotationPolicy` is `{interval: Duration (optional, min 1h), gracePeriod:
+`rotationPolicy` is `{interval: Duration (optional, min 1h, max 8760h), gracePeriod:
 Duration (default 1h, min 5m, max 168h)}`. Events: `RotationStarted`,
 `RotationFinished` (Normal), `RotationFailed` (Warning). A backend with no
 overlap implements `RotateBegin` as the hard cut and `RotateFinish` as a
@@ -532,9 +539,9 @@ Each is a proposal with its trade-off and the author's lean.
 7. **Separator per backend**: `_` roles and databases, `-` buckets, clients,
    MQTT users, `/` topics, `:` Valkey. The plan fixed buckets and clients at
    `<ns>-<name>`. Lean: as proposed.
-8. **Binding types**: `redis` for Valkey (the spec has no `valkey`) and
-   craftainer-defined `s3`, `mqtt`, `oidc` keys outside the spec's
-   well-known list; a `uri` key is added. Alternative: `valkey` as the type.
+8. **Binding types**: `redis` for Valkey (the core spec defines no types, so
+   `valkey` would be as valid) and craftainer-defined keys for all five
+   types beyond the spec's reserved entries; a `uri` key is added. Alternative: `valkey` as the type.
    Lean: `redis` for client-library compatibility.
 9. **DCR state location**: operator namespace (tenant never sees the RAT;
    removal by finalizer), against the claim's namespace (owner-reference
@@ -562,6 +569,18 @@ Each is a proposal with its trade-off and the author's lean.
     [`docs/crd-drafts.md`](../crd-drafts.md), including the COSI-aligned
     S3 names (`ClusterObjectStore`, `ObjectStore`, `Bucket`, `BucketAccess`).
     Lean: accept as drafted.
+
+## Open issues
+
+New design questions found in review; not decided here.
+
+- Binding CA key: the spec reserves `certificates` (PEM chain) for TLS trust,
+  while section 7 and the drafts use `sslrootcert`. Offer both, or only
+  `certificates`?
+- A cache or broker without TLS inside a namespace (a test instance) is not
+  expressible, because EB-14 requires TLS to every backend. Is a documented
+  exception wanted?
+- `Observe` plus `rotationPolicy` on the same claim is not specified.
 
 [Kubernetes API conventions]: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md
 [Service Binding spec]: https://github.com/servicebinding/spec
