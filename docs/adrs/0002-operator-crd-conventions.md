@@ -124,10 +124,11 @@ We will follow the conventions below in every operator and in
 - `server.Resolve(ctx, c, claimNS, ref)` is the only place that reads a
   server or its admin Secret. It returns `ErrNamespaceNotAllowed` for a
   namespace outside the selector, and the framework reports it as
-  `Synced=False`, reason `NamespaceNotAllowed`, with no further retries
-  until the claim or the server changes. It reads the `Namespace` through
+  `Synced=False`, reason `NamespaceNotAllowed`, and requeues the claim at the
+  drift-poll interval (no error backoff), because a `Namespace` label change
+  triggers neither the claim nor the server. It reads the `Namespace` through
   the cache on every reconcile, so a label change takes effect on the next
-  reconcile (the server also triggers a re-queue of its claims).
+  reconcile (a change to the server also re-queues its claims).
 
 ### 3. Claim spec and status shape
 
@@ -581,6 +582,15 @@ New design questions found in review; not decided here.
   expressible, because EB-14 requires TLS to every backend. Is a documented
   exception wanted?
 - `Observe` plus `rotationPolicy` on the same claim is not specified.
+- `proxyURL` may carry credentials (`http://user:pass@proxy`) into a plain spec
+  field; reject userinfo by CEL, or add a Secret reference for proxy auth?
+- A namespaced server lets a tenant aim the operator at any host, port,
+  endpoint, issuer or proxy; no egress or SSRF restriction is drafted
+  (for example a deny list for link-local and cluster-internal ranges, or
+  gating the namespaced tier).
+- `External.Create` returns only `binding.Data`, so a backend-assigned
+  `externalId` has no explicit channel to the framework; the per-kind
+  `host`, `port` and `sslMode` fields also do not reach `server.Connection`.
 
 [Kubernetes API conventions]: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md
 [Service Binding spec]: https://github.com/servicebinding/spec

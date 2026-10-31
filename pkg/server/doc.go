@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -24,6 +25,13 @@ type Connection struct {
 	Admin map[string][]byte
 	// Proxy is the server's proxyURL; nil means the process environment.
 	Proxy *url.URL
+	// ServerName is tls.serverName; empty means the host of Endpoint.
+	ServerName string
+	// MinTLSVersion is tls.minVersion as a crypto/tls constant
+	// (tls.VersionTLS12 or tls.VersionTLS13).
+	MinTLSVersion uint16
+	// HealthCheckInterval is healthCheckInterval.
+	HealthCheckInterval time.Duration
 }
 
 var (
