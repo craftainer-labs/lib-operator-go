@@ -1,0 +1,60 @@
+# Stopgap for template-base's `verify-published` job, which runs only when a
+# PYPI_PUBLISH / NPM_PUBLISH / CARGO_PUBLISH variable is set. A Go module has
+# no publish step (the git tag is the release), so none of those applies and
+# that job never runs here. This workflow runs the same `make verify-published`
+# target instead, by hand right after each Release:
+#   gh workflow run verify-published.yml -f tag=vX.Y.Z
+# It is manual on purpose. `workflow_run` (zizmor: dangerous-triggers) is not
+# used, `release: published` does not fire for a release created with
+# GITHUB_TOKEN, and `workflow_call` needs a change to template-base's
+# base-owned release.yml. Once template-base can opt a Go module in (NX6),
+# verification runs inside the release contract as an in-workflow job; this
+# file is then deleted and kept as a tombstone line in this template's sync
+# manifest, so a sync removes it from every module.
+#
+# No secrets and no write token: it only reads the public module proxy.
+# The public proxy cannot see a private repository, so those are skipped.
+name: Verify published
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to check, e.g. v1.2.3
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    # renovate: datasource=github-runners depName=ubuntu
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-24.04' }}
+    if: github.event.repository.private == false
+    timeout-minutes: 15
+    steps:
+      - name: Validate the release tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::not a release tag: '${INPUT_TAG}' (expected vX.Y.Z)"
+            exit 1
+          fi
+
+      - name: Check out the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Verify the module resolves on proxy.golang.org
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: make verify-published
