@@ -1,0 +1,4 @@
+# This module's own paths that the template's sync manifest can't know about;
+# ignore tier only, read by the completeness check and never by sync.
+ignore:
+  - docs/crd-drafts.md
