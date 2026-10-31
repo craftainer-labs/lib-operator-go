@@ -127,8 +127,11 @@ We will follow the conventions below in every operator and in
   `Synced=False`, reason `NamespaceNotAllowed`, and requeues the claim at the
   drift-poll interval (no error backoff), because a `Namespace` label change
   triggers neither the claim nor the server. It reads the `Namespace` through
-  the cache on every reconcile, so a label change takes effect on the next
-  reconcile (a change to the server also re-queues its claims).
+  the cache on every reconcile, so a label change takes effect on the claim's
+  next reconcile, which is at the latest its next drift poll (10m by default,
+  longer if `craftainer.dev/poll-interval` is raised); a change to the server
+  re-queues its claims at once. The namespaced tier and `proxyURL` have open
+  questions at the end ("Open issues").
 
 ### 3. Claim spec and status shape
 

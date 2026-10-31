@@ -110,11 +110,16 @@ type Claim interface {
 	GetConditions() *[]metav1.Condition
 	SetBindingName(string)
 	// The framework writes the rest of status (ADR 0002, section 3).
-	// GetExternalName is what Observe looks an adopted object up by.
+	// GetExternalName and GetExternalID are what the framework hands Observe
+	// to look an object up by; Observe never re-derives them (ADR 0002,
+	// section 3). The Observe signature below does not carry them yet (open
+	// issue in the ADR).
 	GetExternalName() string
 	SetExternalName(string)
-	// SetExternalID stores a backend-assigned id (an OIDC client_id, an S3
-	// access key id); empty for kinds that have none.
+	// GetExternalID and SetExternalID hold a backend-assigned id (an OIDC
+	// client_id, an S3 access key id); empty for kinds that have none. How an
+	// External reports a new id to the framework is an open issue in ADR 0002.
+	GetExternalID() string
 	SetExternalID(string)
 	SetObservedGeneration(int64)
 	SetLastReconcileTime(metav1.Time)

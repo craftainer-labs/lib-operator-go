@@ -468,7 +468,7 @@ Includes `ClaimCommon` (default `deletionPolicy: Delete`), `Credentials`
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
 | `public` | bool | no | `false` | public clients get no secret |
-| `redirectUris` | list of string | yes | | minItems 1, maxItems 20, each maxLength 2048; `https`, or `http` only when the parsed host is exactly `localhost` or `127.0.0.1` (a prefix match would accept `http://localhost.evil.example`); no wildcard; unique |
+| `redirectUris` | list of string | yes | | minItems 1, maxItems 20, each maxLength 2048; `https`, or `http` only when the parsed host is exactly `localhost` or `127.0.0.1` (a prefix or regex match would accept `http://localhost.evil.example`; check the parsed host, for example with CEL `url(x).getHostname()`); no wildcard; unique. `[::1]` is not allowed |
 | `postLogoutRedirectUris` | list of string | no | `[]` | as above |
 | `webOrigins` | list of string | no | `[]` | maxItems 20; no `*` |
 | `grantTypes` | list of enum | no | `[authorization_code]` | `authorization_code`, `refresh_token`, `client_credentials`; CEL: `client_credentials` requires `public: false` |
