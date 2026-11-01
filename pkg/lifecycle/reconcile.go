@@ -257,7 +257,12 @@ func (r *run[S, O]) sync() (ctrl.Result, error) {
 		data, did = d, "Update"
 		r.event(corev1.EventTypeNormal, conditions.EventUpdated, "Update", "updated the external object")
 	}
-	if r.opts.Class == ClassCredential && len(data) > 0 {
+	if r.opts.Class == ClassCredential && did != "" {
+		if len(data) == 0 {
+			// The credential was created or changed on the backend but never
+			// delivered: say so instead of reporting Ready.
+			return r.failed(did, ErrNoBindingData)
+		}
 		if err := r.writeBinding(data); err != nil {
 			return r.failed("WriteSecret", err)
 		}

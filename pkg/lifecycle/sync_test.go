@@ -957,3 +957,39 @@ func TestAuditEntriesAreForgottenForClaimsThatDisappear(t *testing.T) {
 		}
 	})
 }
+
+// A credential kind whose Create or Update returns no binding data has issued a
+// credential nobody will receive: that is an error, not Ready.
+func TestCredentialKindWithoutBindingDataFails(t *testing.T) {
+	tests := []struct {
+		name  string
+		ext   func() *fakeExt
+		calls []string
+	}{
+		{"Create", missing, []string{"Observe", "Create"}},
+		{"Update", drifted, []string{"Observe", "Update"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, nil, gadget())
+			ext := tt.ext() // no CreateData, no UpdateData
+			res, err := h.reconcileGadget(ext, h.credOpts())
+			if !errors.Is(err, lifecycle.ErrNoBindingData) || res.RequeueAfter != 0 {
+				t.Fatalf("result %+v, err %v", res, err)
+			}
+			if got := ext.Calls(); !slices.Equal(got, tt.calls) {
+				t.Errorf("calls = %v", got)
+			}
+			g := h.gadget("g")
+			wantCond(t, g.Status.Conditions, ready, metav1.ConditionFalse, conditions.ReconcileError)
+			wantCond(t, g.Status.Conditions, synced, metav1.ConditionFalse, conditions.ReconcileError)
+			if msg := cond(g.Status.Conditions, synced).Message; !strings.HasPrefix(msg, tt.name+": ") {
+				t.Errorf("message = %q", msg)
+			}
+			h.rec.AssertEvent(t, corev1.EventTypeWarning, conditions.ReconcileError, "no binding data")
+			if err := h.c.Get(h.ctx, client.ObjectKey{Namespace: "ns", Name: "g"}, &corev1.Secret{}); err == nil {
+				t.Error("a binding Secret was written without data")
+			}
+		})
+	}
+}

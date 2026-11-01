@@ -12,6 +12,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -132,6 +133,16 @@ func TestNamespaceReportsAPIFailures(t *testing.T) {
 func TestRecorder(t *testing.T) {
 	r := &testenv.Recorder{}
 	w := &testapi.Widget{}
+	r.Eventf(w, nil, corev1.EventTypeNormal, "Created", "Create", "made %s #%d", "thing", 1)
+	r.Eventf(w, nil, corev1.EventTypeWarning, "ReconcileError", "Observe", "failed: %s", "boom")
+
+	// A note without arguments is not a format string: a literal % stays.
+	var rec events.EventRecorder = r
+	rec.Eventf(w, nil, corev1.EventTypeNormal, "Literal", "Observe", "disk at 100% and 50%d")
+	if got := r.Events()[2].Note; got != "disk at 100% and 50%d" {
+		t.Errorf("note = %q", got)
+	}
+	r.Reset()
 	r.Eventf(w, nil, corev1.EventTypeNormal, "Created", "Create", "made %s #%d", "thing", 1)
 	r.Eventf(w, nil, corev1.EventTypeWarning, "ReconcileError", "Observe", "failed: %s", "boom")
 

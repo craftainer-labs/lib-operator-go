@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -97,8 +98,6 @@ func TestDeletionOutcomeTable(t *testing.T) {
 		{name: "credential, Observe only: Retained", kind: credential, policies: policies("Observe"), wantEvents: []string{retained}},
 		{name: "Observe+LateInitialize is not ours either", kind: credential, policies: policies("Observe", "LateInitialize"),
 			wantEvents: []string{retained}},
-		// A stored list the CEL rules would reject fails closed.
-		{name: "credential, invalid list: nothing is deleted", kind: credential, policies: policies("Create"), wantEvents: []string{retained}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -387,5 +386,47 @@ func TestDeletionIsAudited(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no audit line for the deletion: %v", h.logLines())
+	}
+}
+
+// A stored list the CEL rules would reject leaves what the claim may do with the
+// external object unknown: deletion is blocked, never Retained or Deleted.
+func TestInvalidPoliciesBlockDeletion(t *testing.T) {
+	for _, list := range [][]common.ManagementPolicy{policies("Create"), policies("*", "Observe"), policies("Observe", "Bogus")} {
+		for _, kind := range []string{"data", "credential"} {
+			t.Run(kind+" "+string(list[0]), func(t *testing.T) {
+				ext := existing()
+				var h *harness
+				var res ctrl.Result
+				var err error
+				if kind == "credential" {
+					h = newHarness(t, nil, gadget(terminatingGadget, func(g *testGadget) { g.Spec.ManagementPolicies = list }))
+					res, err = h.reconcileGadget(ext, h.credOpts())
+				} else {
+					h = newHarness(t, nil, widget(terminating, pinned(common.DeletionDelete, common.SourceOperatorDefault),
+						func(w *testWidget) { w.Spec.ManagementPolicies = list }))
+					res, err = h.reconcileWidget(ext, h.dataOpts())
+				}
+				wantResult(t, res, err, poll)
+				if len(ext.Calls()) != 0 {
+					t.Errorf("the backend was touched: %v", ext.Calls())
+				}
+				h.rec.AssertReasons(t, conditions.ManagementPolicyBlocked)
+				h.rec.AssertEvent(t, corev1.EventTypeWarning, conditions.ManagementPolicyBlocked, "managementPolicies")
+				var conds []metav1.Condition
+				var finalizers []string
+				if kind == "credential" {
+					g := h.gadget("g")
+					conds, finalizers = g.Status.Conditions, g.Finalizers
+				} else {
+					w := h.widget("w")
+					conds, finalizers = w.Status.Conditions, w.Finalizers
+				}
+				wantCond(t, conds, synced, metav1.ConditionFalse, conditions.ManagementPolicyBlocked)
+				if !slices.Contains(finalizers, lifecycle.DefaultFinalizer) {
+					t.Error("the finalizer was dropped")
+				}
+			})
+		}
 	}
 }

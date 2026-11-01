@@ -62,7 +62,17 @@ func (r *run[S, O]) rotate(cur O) (rotationOutcome, error) {
 		return rotationOutcome{}, nil
 	}
 	if !r.pol.Update {
-		return rotationOutcome{blocked: true}, nil
+		// A trigger without Update is consumed and rejected once, like one during a
+		// grace period: it neither repeats every poll nor rotates when Update is
+		// added later. Only an elapsed interval keeps the claim blocked.
+		if triggered {
+			rs.LastTrigger = trigger
+			cl.SetRotationStatus(rs)
+			r.event(corev1.EventTypeWarning, conditions.EventRotationDeferred, "Rotate",
+				"%s=%q is ignored: managementPolicies lacks Update, so the claim may not rotate; set a new value once it has Update",
+				AnnotationRotate, trigger)
+		}
+		return rotationOutcome{blocked: r.due(policy, rs, false)}, nil
 	}
 	return r.begin(rot, cur, rs, trigger, policy)
 }
@@ -113,15 +123,26 @@ func (r *run[S, O]) begin(rot Rotator[S, O], cur O, rs common.RotationStatus, tr
 	}
 	out := rotationOutcome{rotated: true}
 	reason := conditions.EventRotatedWithoutOverlap
+	grace := policy.GracePeriodOrDefault()
 	if !hardCut {
-		grace := policy.GracePeriodOrDefault()
 		retire := metav1.NewTime(r.now.Add(grace))
 		rs.Previous, rs.RetireAfter = previous, &retire
-		out.grace, out.retireIn = true, grace
+		out.grace, out.retireIn = grace > 0, grace
 		reason = conditions.EventRotationStarted
 	}
 	r.claim.SetRotationStatus(rs)
 	r.event(corev1.EventTypeNormal, reason, "Rotate", "issued credential generation %s", rs.Active)
+	if !hardCut && grace <= 0 {
+		// An explicit gracePeriod of 0 is a hard cut: retire the previous
+		// generation now, in this reconcile, never as a zero RequeueAfter. The
+		// grace state recorded above is already due, so a failure here is retried.
+		fin, err := r.finishIfDue(rot, cur, rs)
+		if err != nil {
+			return rotationOutcome{}, err
+		}
+		fin.rotated = true
+		return fin, nil
+	}
 	return out, nil
 }
 

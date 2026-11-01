@@ -486,7 +486,10 @@ The framework drives a small state machine from `status.rotation`
    and `retireAfter`. A new rotation is not begun while `previous` is set. A
    `craftainer.dev/rotate` value that arrives during a grace period is consumed
    and rejected (`lastTrigger` is updated, Warning Event `RotationDeferred`),
-   not queued: the user sets a new value after the grace period ends.
+   not queued: the user sets a new value after the grace period ends. A
+   `gracePeriod` of 0 (not admitted by the schema's minimum, but possible in a
+   stored object) is a hard cut: `RotateFinish` runs in the same reconcile,
+   right after the binding Secret is written.
 
 `rotationPolicy` is `{interval: Duration (optional, min 1h, max 8760h), gracePeriod:
 Duration (default 1h, min 5m, max 168h)}`. Events: `RotationStarted`,

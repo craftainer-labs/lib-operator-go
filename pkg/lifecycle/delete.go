@@ -23,6 +23,12 @@ func (r *run[S, O]) finalize() (ctrl.Result, error) {
 		return ctrl.Result{}, nil
 	}
 	conditions.Ensure(cl.GetConditions(), cl.GetGeneration())
+	if r.polErr != nil {
+		// The stored list cannot be read, so what the claim may do with the external
+		// object is unknown: keep the finalizer rather than guess Retained or Delete.
+		return r.blocked(conditions.ManagementPolicyBlocked,
+			"deletion is blocked until managementPolicies is valid: "+r.polErr.Error(), true)
+	}
 	policy, repinned := r.deletionPolicy()
 	if repinned {
 		r.event(corev1.EventTypeWarning, conditions.EventDeletionPolicyRepinned, "Delete",

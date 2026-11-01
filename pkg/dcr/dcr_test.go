@@ -100,7 +100,9 @@ func TestDeleteIsIdempotent(t *testing.T) {
 func TestOrphanKeepsTheStateAndLabelsIt(t *testing.T) {
 	ctx := context.Background()
 	st, c := store(t, nil)
-	if err := st.Orphan(ctx, claim()); !errors.Is(err, dcr.ErrNotFound) {
+	// A claim deleted before its registration completed has no state to keep:
+	// success, so its finalizer can clear.
+	if err := st.Orphan(ctx, claim()); err != nil {
 		t.Errorf("Orphan of nothing: %v", err)
 	}
 	if err := st.Write(ctx, claim(), dcr.State{ClientID: "c1", RegistrationAccessToken: "rat"}); err != nil {

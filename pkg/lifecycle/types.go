@@ -115,6 +115,9 @@ var (
 	// another claim: the claim gets reason NameCollision and is not retried with
 	// backoff.
 	ErrNameCollision = binding.ErrNameCollision
+	// ErrNoBindingData is the failure of a credential kind whose Create or Update
+	// returned no binding data: the credential would never reach the binding Secret.
+	ErrNoBindingData = errors.New("create or update of a credential kind returned no binding data")
 )
 
 // Claim is implemented by every claim kind's API type. The accessors reach the

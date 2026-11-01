@@ -26,13 +26,16 @@ type Recorder struct {
 
 var _ events.EventRecorder = (*Recorder)(nil)
 
-// Eventf records the Event, formatting the note.
+// Eventf records the Event. The note is formatted with args only when there are
+// any, like the real recorder.
 func (r *Recorder) Eventf(regarding, _ runtime.Object, eventType, reason, action, note string, args ...any) {
+	if len(args) > 0 { // a note without arguments is not a format: keep a literal % as it is
+		note = fmt.Sprintf(note, args...)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.events = append(r.events, RecordedEvent{
-		Type: eventType, Reason: reason, Action: action,
-		Note: fmt.Sprintf(note, args...), Regarding: regarding,
+		Type: eventType, Reason: reason, Action: action, Note: note, Regarding: regarding,
 	})
 }
 

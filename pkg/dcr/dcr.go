@@ -144,16 +144,14 @@ func (s Store) Delete(ctx context.Context, claim client.Object) error {
 }
 
 // Orphan keeps the claim's state and labels it craftainer.dev/orphaned=true, so
-// the client stays manageable through RFC 7592. It returns ErrNotFound when
-// there is no state.
+// the client stays manageable through RFC 7592. A claim with no state Secret
+// (deleted before its registration completed) has nothing to keep: that is
+// success, so its finalizer can clear.
 func (s Store) Orphan(ctx context.Context, claim client.Object) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var secret corev1.Secret
 		if err := s.Client.Get(ctx, s.key(claim), &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				return ErrNotFound
-			}
-			return err
+			return client.IgnoreNotFound(err)
 		}
 		if secret.Labels == nil {
 			secret.Labels = map[string]string{}

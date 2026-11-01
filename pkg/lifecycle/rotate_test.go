@@ -446,6 +446,8 @@ func TestNoRotationAfterACreateOrUpdate(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t, nil, boundSecret(), gadget(trigger("x")))
 			rot := ext()
+			rot.CreateData = binding.Data{"password": []byte("p")}
+			rot.UpdateData = binding.Data{"password": []byte("p")}
 			if err := h.rotationAt(rot, now); err != nil {
 				t.Fatal(err)
 			}
@@ -453,5 +455,109 @@ func TestNoRotationAfterACreateOrUpdate(t *testing.T) {
 				t.Errorf("RotateBegin calls = %d: rotate in the reconcile after the change", n)
 			}
 		})
+	}
+}
+
+// An explicit gracePeriod of 0 is a hard cut: RotateFinish runs in the same
+// reconcile, right after the binding Secret is written (ADR 0002 section 8).
+func TestZeroGracePeriodRetiresThePreviousGenerationAtOnce(t *testing.T) {
+	zero := &metav1.Duration{}
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("go"), withPolicy(nil, zero),
+		withRotation(common.RotationStatus{Active: "gen-0"})))
+	rot := existingRot()
+	res, err := h.reconcileGadget(rot, h.credOpts())
+	wantResult(t, res, err, poll) // never a zero RequeueAfter
+
+	if got := rot.Calls(); !slices.Equal(got, []string{"Observe", "RotateBegin", "RotateFinish"}) {
+		t.Errorf("calls = %v", got)
+	}
+	if got := rot.FinishStates(); len(got) != 1 || got[0] != (lifecycle.RotationState{Active: "gen-1", Previous: "gen-0", Sequence: 1}) {
+		t.Errorf("RotateFinish state = %+v", got)
+	}
+	g := h.gadget("g")
+	if rs := g.Status.Rotation; rs.Active != "gen-1" || rs.Previous != "" || rs.RetireAfter != nil || rs.Sequence != 1 || rs.LastTrigger != "go" {
+		t.Errorf("status.rotation = %+v", rs)
+	}
+	if got := string(h.secret("g").Data["password"]); got != "NEW-PASSWORD" {
+		t.Errorf("binding password = %q", got)
+	}
+	wantCond(t, g.Status.Conditions, synced, metav1.ConditionTrue, conditions.ReconcileSuccess)
+	h.rec.AssertReasons(t, conditions.EventRotationStarted, conditions.EventRotationFinished)
+}
+
+func TestZeroGracePeriodFinishFailureIsRetried(t *testing.T) {
+	boom := errors.New("finish refused")
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("go"), withPolicy(nil, &metav1.Duration{}),
+		withRotation(common.RotationStatus{Active: "gen-0"})))
+	rot := existingRot()
+	rot.FinishErr = boom
+	if _, err := h.reconcileGadget(rot, h.credOpts()); !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	if rs := h.gadget("g").Status.Rotation; rs.Active != "gen-1" || rs.Previous != "gen-0" || rs.RetireAfter == nil {
+		t.Fatalf("status.rotation = %+v: the due grace state must be kept", rs)
+	}
+	rot.FinishErr = nil
+	if _, err := h.reconcileGadget(rot, h.credOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if rs := h.gadget("g").Status.Rotation; rs.Previous != "" || rs.RetireAfter != nil {
+		t.Errorf("status.rotation = %+v", rs)
+	}
+	if n := len(rot.BeginStates()); n != 1 || len(rot.FinishStates()) != 2 {
+		t.Errorf("RotateBegin %d, RotateFinish %d", n, len(rot.FinishStates()))
+	}
+}
+
+func TestZeroGracePeriodOnAHardCutBackendNeedsNoFinish(t *testing.T) {
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("go"), withPolicy(nil, &metav1.Duration{})))
+	rot := existingRot()
+	rot.HardCutBackend = true
+	if _, err := h.reconcileGadget(rot, h.credOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rot.FinishStates()); n != 0 {
+		t.Errorf("RotateFinish calls = %d", n)
+	}
+}
+
+// A trigger without Update is consumed and rejected once; it neither repeats
+// every poll nor rotates when Update is added later.
+func TestTriggerWithoutUpdateIsConsumedOnce(t *testing.T) {
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("x"), withPolicies("Observe", "Create")))
+	rot := existingRot()
+	deferred := func() int {
+		n := 0
+		for _, r := range h.rec.Reasons() {
+			if r == conditions.EventRotationDeferred {
+				n++
+			}
+		}
+		return n
+	}
+	for range 3 {
+		if _, err := h.reconcileGadget(rot, h.credOpts()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if deferred() != 1 {
+		t.Errorf("RotationDeferred events = %d, want 1", deferred())
+	}
+	h.rec.AssertEvent(t, corev1.EventTypeWarning, conditions.EventRotationDeferred, "lacks Update")
+	g := h.gadget("g")
+	if g.Status.Rotation == nil || g.Status.Rotation.LastTrigger != "x" {
+		t.Errorf("status.rotation = %+v: the trigger is consumed", g.Status.Rotation)
+	}
+	wantCond(t, g.Status.Conditions, synced, metav1.ConditionTrue, conditions.ReconcileSuccess)
+
+	g.Spec.ManagementPolicies = []common.ManagementPolicy{"Observe", "Create", "Update"}
+	if err := h.c.Update(h.ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.reconcileGadget(rot, h.credOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rot.BeginStates()); n != 0 {
+		t.Errorf("RotateBegin calls = %d: the consumed trigger must not rotate later", n)
 	}
 }
