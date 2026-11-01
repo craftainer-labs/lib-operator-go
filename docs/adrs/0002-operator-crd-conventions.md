@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (awaiting the G-api gate; the open choices are listed in "Decisions for the user (G-api)" at the end)
+Accepted, 2026-11-01 (G-api gate passed; the outcomes are recorded in "Decisions (G-api, 2026-11-01)" at the end)
 
 ## Context
 
@@ -28,20 +28,23 @@ Forces and prior decisions that bear on it (plan decision log, 2026-10-30 and
 NR4 of 2026-10-31):
 
 - Namespace is the tenant. A cluster-scoped server object declares
-  `allowedNamespaces` (EB-3).
+  `allowedNamespaces`, and the object is invalid without it (EB-3).
 - Backends cannot enforce tenant naming against an admin credential, so the
   naming function and the server resolver are the only tenancy guard (NR4 5).
 - Credentials are written as Service Binding spec Secrets, with no binding
   runtime dependency, because Red Hat's Service Binding Operator is archived
   and the spec is still a working draft. COSI is not used (pre-alpha
   `v1alpha2`); the S3 kinds only borrow its names.
-- The semantics (`deletionPolicy`, `managementPolicies`, poll interval) are
-  borrowed from Crossplane managed resources, without adopting its providers.
+- The semantics of `managementPolicies` and the poll interval are borrowed
+  from Crossplane managed resources, without adopting its providers.
+  `deletionPolicy` is narrower than Crossplane's: it exists only on data kinds
+  (section 4).
 - NR4 found that overlapping credential rotation needs two phases on every
   backend that supports it, so I1's single `Rotate` cannot express it (NR4 3).
 - Sources: [Kubernetes API conventions], [Service Binding spec], [COSI],
-  [Crossplane managed resources], [controller-runtime docs], [K8s RBAC good
-  practices], [Pod Security Standards], [Go FIPS 140-3].
+  [Crossplane managed resources], [Gateway API AllowedRoutes],
+  [controller-runtime docs], [K8s RBAC good practices],
+  [Pod Security Standards], [Go FIPS 140-3].
 
 ## Decision
 
@@ -92,12 +95,19 @@ We will follow the conventions below in every operator and in
   service on the API server).
 - `spec` and `status` are separate subresources. `status` is written only by
   the operator. Defaults are in the schema (`+kubebuilder:default`), not in a
-  mutating webhook. Immutable fields use the CEL transition rule
+  mutating webhook; the one exception is a data kind's `deletionPolicy`,
+  whose default is operator configuration (section 4). Immutable fields use the CEL transition rule
   `self == oldSelf` ([CEL validation rules]). Every kind has printer columns
   `Ready`, `Synced`, `Server`, `Age`, and the category `craftainer`.
 - The shared finalizer is `craftainer.dev/finalizer`. The shared annotations
   are `craftainer.dev/poll-interval`, `craftainer.dev/rotate` and
-  (proposed) `craftainer.dev/paused`.
+  `craftainer.dev/paused` (`"true"` stops reconciling without deleting;
+  Crossplane's pause).
+- The Go types shared by all operators (`ClaimCommon`, `DataClaim`,
+  `Credentials` with `rotationPolicy`, `ClaimStatus`, `RotationStatus`,
+  `AllowedNamespaces`, `ManagementPolicy`) live in `lib-operator-go`'s
+  `pkg/apis/common`, with generated deep-copy; the operators embed them and
+  do not copy them. This extends I1.
 
 ### 2. Server tiers and `allowedNamespaces`
 
@@ -107,17 +117,41 @@ We will follow the conventions below in every operator and in
   `allowedNamespaces`. `<Kind>Server` (namespaced) has the same fields except
   `allowedNamespaces`, and its Secret reference names a Secret in its own
   namespace. Only the namespaced server is meant for a team that brings its
-  own service.
+  own service. Both tiers ship in every group in `v1alpha1`.
 - `adminCredentialsSecretRef` of a cluster server MUST name a Secret in the
   operator's own namespace; the controller refuses any other namespace with
   `Ready=False`, reason `AdminSecretNamespaceForbidden`. This stops a
   cluster server from being pointed at a tenant's Secret.
-- `allowedNamespaces` is a `metav1.LabelSelector` matched against the labels
-  of the claim's `Namespace` object. **It fails closed:** an absent
-  `allowedNamespaces` allows no namespace; an empty selector (`{}`) allows
-  every namespace and has to be written explicitly. Specific namespaces are
-  selected with `matchExpressions` on the immutable
-  `kubernetes.io/metadata.name` label, which the API server sets.
+- `allowedNamespaces` has the shape of the Gateway API's
+  `allowedRoutes.namespaces` ([Gateway API AllowedRoutes], type
+  `RouteNamespaces`, with `FromNamespaces` values `All`, `Selector`, `Same`),
+  minus `Same`:
+
+  ```yaml
+  allowedNamespaces:
+    from: Selector            # All | Selector
+    selector:                 # metav1.LabelSelector; required iff from: Selector
+      matchExpressions:
+        - {key: kubernetes.io/metadata.name, operator: In, values: [team-a, team-b]}
+  ```
+
+  - `from: All` allows every namespace. `from: Selector` allows the namespaces
+    whose `Namespace` object labels match `selector`. Specific namespaces are
+    selected with `matchExpressions` on the immutable
+    `kubernetes.io/metadata.name` label, which the API server sets.
+  - **It fails closed.** `allowedNamespaces` and its `from` are required on a
+    cluster server: the CRD schema marks them `required`, so the API server
+    rejects a `Cluster<Kind>Server` without them. There is no default for
+    `from`, and no value that means "no namespace" or "same namespace" on a
+    cluster server. CEL on `allowedNamespaces` rejects `selector` when
+    `from: All`, a missing `selector` when `from: Selector`, and a
+    `Selector` with neither `matchLabels` nor `matchExpressions` (an empty
+    `metav1.LabelSelector` matches everything; `from: All` is how that is
+    said). If a stored object nevertheless lacks the field (written before
+    the schema, or by a bypassed webhook), the controller treats it as
+    allowing no namespace.
+  - A namespaced server has no `allowedNamespaces` field. It is implicitly
+    `Same`: only claims in the server's own namespace may use it.
 - A claim references its server with `serverRef: {kind, name}`. The kind
   enumerates the group's two server kinds. A namespaced server is always
   looked up in the claim's own namespace. `serverRef` is immutable.
@@ -130,8 +164,8 @@ We will follow the conventions below in every operator and in
   the cache on every reconcile, so a label change takes effect on the claim's
   next reconcile, which is at the latest its next drift poll (10m by default,
   longer if `craftainer.dev/poll-interval` is raised); a change to the server
-  re-queues its claims at once. The namespaced tier and `proxyURL` have open
-  questions at the end ("Open issues").
+  re-queues its claims at once. `proxyURL` and the namespaced tier's egress
+  have open questions at the end ("Open issues").
 
 ### 3. Claim spec and status shape
 
@@ -141,10 +175,15 @@ Every claim has these common spec fields (the drafts name them
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `serverRef` | `{kind, name}` | required | immutable |
-| `deletionPolicy` | `Delete` or `Retain` | per group (below) | |
-| `managementPolicies` | list of `*` or `Observe` | `["*"]` | see below |
+| `managementPolicies` | list of `*`, `Observe`, `Create`, `Update`, `Delete`, `LateInitialize` | `["*"]` | section 5 |
+| `deletionPolicy` | `Delete` or `Retain` | none in the schema; the operator's default (section 4) | data kinds only (`DataClaim`); credential-bearing kinds have no such field |
 | `binding.secretName` | DNS-1123 subdomain | claim name | credential-bearing kinds only; immutable |
 | `rotationPolicy` | object | absent | credential-bearing kinds only |
+
+The data kinds are `Database` and `Bucket`. The credential-bearing kinds are
+`DatabaseRole`, `BucketAccess`, `MqttUser`, `CacheUser` and `OidcClient`.
+The `mqtt`, `cache` and `oidc` groups have no data kind, so no field or
+setting of theirs is called `deletionPolicy`.
 
 Every claim has this common status (`ClaimStatus`):
 
@@ -157,50 +196,125 @@ Every claim has this common status (`ClaimStatus`):
   Reasons used: `Available`, `Creating`, `Updating`, `Deleting`,
   `ReconcileSuccess`, `ReconcileError`, `ServerUnreachable`,
   `ServerNotFound`, `NamespaceNotAllowed`, `AdminSecretNamespaceForbidden`,
-  `NameCollision`, `ObserveOnly`, `RotationUnsupported`, `Rotating`.
+  `NameCollision`, `ObserveOnly`, `ManagementPolicyBlocked`,
+  `RotationUnsupported`, `Rotating`.
 - `externalName`: the derived external name (and `externalId` when the
   backend assigns one). Observe goes by these, never by re-deriving.
 - `binding.name`: the binding Secret's name. Its presence makes the claim a
   Provisioned Service in the [Service Binding spec] sense.
 - `rotation`: see section 8.
 - `lastReconcileTime`.
+- Data kinds only: `effectiveDeletionPolicy` (`Delete` or `Retain`) and
+  `deletionPolicySource` (`Spec` or `OperatorDefault`), see section 4.
 
 Conditions follow the [Kubernetes API conventions] (`Ready` summarises;
 no condition is removed once set; the controller sets `Unknown` instead of
 dropping a condition it cannot evaluate).
 
-### 4. `deletionPolicy`
+### 4. Deletion and `deletionPolicy`
 
-- A finalizer holds the claim until the external object is handled.
-  `Delete` removes the external object; `Retain` leaves it and removes the
-  finalizer. Both then delete the binding Secret, which is owned by the claim.
-- Defaults per group: `Retain` for `db` and `s3`; `Delete` for `mqtt`,
-  `cache` and `oidc` (plan). The default is in the schema.
+- A finalizer holds the claim until the external object is handled. Then the
+  binding Secret goes, which is owned by the claim.
+- **Credential-bearing kinds are always deleted.** `DatabaseRole`,
+  `BucketAccess`, `MqttUser`, `CacheUser` and `OidcClient` have no
+  `deletionPolicy` field. When the claim is deleted, the operator deletes the
+  external role, access key, user or client (all rotation generations,
+  section 8), so no live credential outlives its claim. The one condition is
+  that `managementPolicies` permits `Delete` (section 5).
+- **Data kinds have `spec.deletionPolicy`** (`Retain` or `Delete`): `Database`
+  and `Bucket`. `Delete` removes the external object; `Retain` leaves it and
+  removes the finalizer. The field is optional and has no schema default.
+- **The default comes from operator configuration.** Each operator reads the
+  environment variable `DEFAULT_DATA_DELETION_POLICY` (the same name in all
+  five operators; the library parses it into `Options.DefaultDeletionPolicy`
+  for data kinds). Allowed values are `Retain` and `Delete`. Unset or empty
+  means `Retain`. Any other value fails operator startup: the process logs the
+  value and the allowed values and exits non-zero, so the operator never runs
+  with a policy nobody chose. A value in `spec.deletionPolicy` overrides the
+  default for that object. The operators in `mqtt`, `cache` and `oidc` have no
+  data kind; they still accept the variable (so one Helm value serves all
+  five) but do not use it.
+- **The effective policy is observable.** On every reconcile the controller
+  writes `status.effectiveDeletionPolicy` (the policy that deletion will use
+  now) and `status.deletionPolicySource` (`Spec` or `OperatorDefault`). It
+  emits a Normal Event `DeletionPolicyResolved` when either value is first set
+  or changes, for example after the operator is restarted with another
+  default. Deletion applies the value it resolves at that moment from the spec
+  and the operator's configuration. The operator logs the configured default
+  once at startup.
+- **Deletion outcome** (`P` is whether `managementPolicies` permits `Delete`):
+
+  | Kind | `P` | Effective policy | External object | Event |
+  | --- | --- | --- | --- | --- |
+  | credential | yes | n/a | deleted | `Deleted` |
+  | data | yes | `Delete` | deleted | `Deleted` |
+  | data | yes | `Retain` | left in place | `Retained` |
+  | any | no | any | left in place (orphaned) | Warning `ExternalObjectOrphaned` |
+
+  Without `Delete` in `managementPolicies` the operator never deletes the
+  external object, as in Crossplane, where an external resource without the
+  `Delete` policy is orphaned ([Crossplane managed resources]). For a
+  credential-bearing kind this takes precedence over the always-delete rule:
+  the credential stays valid on the backend after the claim is gone. The
+  Warning Event `ExternalObjectOrphaned` names the external object and says
+  that its credential is still valid, and the operator logs it. The binding
+  Secret is still deleted with the claim. Anyone who writes a policy list
+  without `Delete` on a credential-bearing kind is choosing that outcome.
 - Deleting a claim whose server is unreachable blocks on the finalizer with
   `Synced=False`, reason `ServerUnreachable`, and an Event; it never drops
   the finalizer silently. A user who must force it removes the finalizer by
   hand, which is a documented, deliberate act.
-- A `Retain`ed external object is not adopted by the next claim of the same
-  name automatically; adoption needs `managementPolicies: [Observe]`.
+- A `Retain`ed or orphaned external object is not adopted by the next claim of
+  the same name automatically; adoption needs `managementPolicies: [Observe]`.
 
 ### 5. `managementPolicies`
 
-A list with the values `*` (full control: create, update, delete) and
-`Observe` (adopt an existing object and report on it; never create, update or
-delete it). `["*"]` is the default; `["Observe"]` must stand alone (a CEL rule
-rejects any other combination, and `*` must also stand alone).
+`spec.managementPolicies` takes Crossplane's full vocabulary, with its
+meanings ([Crossplane managed resources], "managementPolicies"). The values:
 
-- With `Observe`, the controller looks the object up by `status.externalName`
-  or, on first reconcile, by the derived name. If it is missing the claim is
-  `Synced=False`, reason `ObserveOnly` ("not found"); it is not created. The
-  binding Secret is written only when the backend can issue the credential
-  without modifying the object (for the credential-less kinds it is not
-  written).
+| Value | Meaning |
+| --- | --- |
+| `*` | The default. Full control: the same as `Observe`, `Create`, `Update`, `Delete` and `LateInitialize` together. |
+| `Observe` | The controller reads the external object and reports on it (`Synced`, `status`). It never changes the object. |
+| `Create` | If the external object does not exist, the controller creates it from the spec. |
+| `Update` | The controller changes the external object to match the spec: field changes, drift correction, and credential rotation (section 8). |
+| `Delete` | The controller may delete the external object when the claim is deleted (section 4). |
+| `LateInitialize` | The controller records backend-assigned values of optional fields that the spec leaves unset in `status`, never in `spec`. A kind with no such field accepts the value and does nothing. |
+
+The default is `["*"]`. Valid combinations (CEL on the field; every other
+list is rejected at admission):
+
+- `*` stands alone: `["*"]`.
+- An explicit list contains `Observe`. The controller always has to read the
+  object to decide anything, so `Create`, `Update`, `Delete` and
+  `LateInitialize` are each valid only together with `Observe`.
+- Values are unique (`maxItems` 5) and the list is not empty. Crossplane
+  treats an empty list as a pause; here the `craftainer.dev/paused`
+  annotation pauses, so there is one way to do it.
+- Any subset of `Create`, `Update`, `Delete`, `LateInitialize` plus `Observe`
+  is valid. Common ones, as in Crossplane's table: `["Observe"]` (observe
+  only, and the way to adopt an existing object), `["Observe", "Create",
+  "Update"]` (never delete the external object), `["Observe", "Create",
+  "Delete"]` (never change it after creation).
+- `rotationPolicy` and the `craftainer.dev/rotate` annotation need `Update`
+  (or `*`); CEL rejects a `rotationPolicy` on a claim whose list lacks it.
+
+Behaviour:
+
+- The controller looks the object up by `status.externalName` or, on first
+  reconcile, by the derived name. If it is missing and `Create` is not
+  permitted, the claim is `Synced=False`, reason `ObserveOnly` when the list is
+  exactly `["Observe"]`, otherwise `ManagementPolicyBlocked`, with the message
+  "not found"; it is not created. If the object has drifted and `Update` is
+  not permitted, the drift is reported in `Synced` (same reasons) and not
+  corrected.
+- The binding Secret is written only when the backend can issue the credential
+  without modifying the object, and only when `Create` or `Update` permits
+  the write (for the credential-less kinds it is not written).
 - Observe reads the object's ownership marker (section 10): an object owned
   by another claim is refused with `NameCollision`.
-- Crossplane's finer policies (`Create`, `Update`, `Delete`, `LateInitialize`)
-  are not adopted in `v1alpha1`; the list shape allows adding them later
-  without a breaking change.
+- Without `Delete`, deletion orphans the external object, including the
+  credential of a credential-bearing kind (section 4).
 
 ### 6. Drift polling
 
@@ -374,32 +488,31 @@ Rules:
    4648, alphabet `a-z2-7`) of `SHA-256(len(ns) ":" ns ":" name)`. The length
    prefix makes the input unambiguous. SHA-256 is FIPS-approved (EB-14).
 2. `readable = ns + sep + name`.
-3. The result is `readable` when **all** hold: `sep` does not occur in `ns`;
-   `len(readable) <= maxLen`; the part of `readable` after its last `sep` is
-   not "hash-shaped" (exactly 10 characters, all in `a-z2-7`).
-4. Otherwise the result is `cut(readable, maxLen - len(sep) - 10) + sep + h`,
-   where `cut` truncates and then strips trailing `-`, `.`, `_`, `/` and `:`
-   so no empty segment or double separator results. The result is never
-   longer than `maxLen`.
-5. `Tenant` panics (a programmer error found by the first test run, never by
+3. **The hash is always appended.** The result is
+   `cut(readable, maxLen - len(sep) - 10) + sep + h`, where `cut` truncates
+   and then strips trailing `-`, `.`, `_`, `/` and `:` so no empty segment or
+   double separator results. The result is never longer than `maxLen`, and
+   there is no branch that returns `readable` unchanged.
+4. `Tenant` panics (a programmer error found by the first test run, never by
    user input) when `maxLen < 16`, when `sep` is empty or longer than one
    byte, or when `ns` or `name` is empty.
 
+Example: `Tenant("team-a", "orders", 63, "_")` is `team-a_orders_gdeqxvirep`
+and `Tenant("team-a", "orders", 63, "-")` is `team-a-orders-gdeqxvirep` (the
+hash does not depend on `sep`).
+
 Why these rules are collision-safe:
 
-- When `sep` is not in `ns`, `readable` splits uniquely at its first `sep`, so
-  two different `(ns, name)` pairs never give the same readable name. For
-  `sep` in `{_, /, :}` that is every namespace, because those characters
-  cannot occur in a namespace. For `sep = "-"` namespaces such as `team-a`
-  take the hashed branch, so `("team-a", "db")` and `("team", "a-db")` cannot
-  collide on `team-a-db`.
-- The readable branch excludes names whose last segment looks like a hash, and
-  every hashed result ends in `sep` and a hash-shaped segment, so the two
-  branches produce disjoint sets. Without that exclusion a tenant could name
-  a claim after another tenant's hash and land on its object.
-- Within the hashed branch, two pairs collide only if their 50-bit hashes
-  match and their visible prefixes match: a second-preimage search of about
-  2^50 SHA-256 evaluations against a chosen victim. As defence in depth, every
+- The hash input is unambiguous because of the length prefix, so two different
+  `(ns, name)` pairs hash independently even when `ns + sep + name` is the same
+  string (`("team-a", "db")` and `("team", "a-db")` both read `team-a-db` on a
+  `-` backend). Every result ends in `sep` and a hash, so no result is a bare
+  tenant-chosen string, and a tenant cannot pick a claim name that lands on
+  another tenant's object without matching its hash.
+- Two pairs collide only if their 50-bit hashes match and their visible
+  prefixes match: a second-preimage search of about 2^50 SHA-256 evaluations
+  against a chosen victim. Because every name is hashed, this is the only
+  barrier on a backend with no ownership marker. As defence in depth, every
   external object created by an operator carries an ownership marker
   (`craftainer.dev/claim=<ns>/<name>/<uid>`) where the backend can hold one
   (PostgreSQL `COMMENT ON ROLE/DATABASE`, S3 bucket tags, Keycloak client
@@ -416,8 +529,8 @@ Callers subtract any suffix they append from `maxLen` (the rotation suffixes
 | S3 bucket (RustFS) | `-` | 63 | bucket names are 3 to 63 lowercase characters, digits, hyphens; the hashed branch always ends alphanumeric |
 | S3 user and service account (RustFS) | `-` | 63 (not verified, see below) | service-account secret keys at most 40 characters (NR4); the access-key and user-name bounds are not in the NR4 findings |
 | MQTT username and client id (Mosquitto) | `-` | 128, then `-a`/`-b` (126) | the MQTT string limit is 65535 bytes; 128 is our cap |
-| MQTT topic root | `/` | not truncated | the root is `<ns>/`, so tenant ACL patterns are `<ns>/...` |
-| Valkey ACL username | `:` | 128 | no hard limit; our cap. Key pattern `~<ns>:*`, channel pattern `&<ns>:*` |
+| MQTT topic root | `/` | not derived by `Tenant` | the root is `<ns>/` (no hash, no truncation), so tenant ACL patterns are `<ns>/...` |
+| Valkey ACL username | `:` | 128 | no hard limit; our cap. Key pattern `~<ns>:*`, channel pattern `&<ns>:*` (these patterns use the namespace, not the hashed name) |
 | Keycloak client id | `-` | 255 | `CLIENT_ID` column is 255 characters (verify in NOxb) |
 | DCR client name | `-` | 255 | free text; our cap |
 | Kubernetes Secret and object names | n/a | 253 | DNS-1123 subdomain; not derived by `Tenant` |
@@ -436,9 +549,10 @@ name containing `.`).
 
 - Each state change emits a Kubernetes Event on the claim through the
   controller's `EventRecorder`: Normal `Created`, `Updated`, `Deleted`,
-  `Observed`, `RotationStarted`, `RotationFinished`, `RotatedWithoutOverlap`;
-  Warning `ServerUnreachable`, `NamespaceNotAllowed`, `NameCollision`,
-  `ReconcileError`, `RotationFailed`. The Event `reason` equals the
+  `Observed`, `Retained`, `DeletionPolicyResolved`, `RotationStarted`,
+  `RotationFinished`, `RotatedWithoutOverlap`; Warning `ServerUnreachable`,
+  `NamespaceNotAllowed`, `NameCollision`, `ManagementPolicyBlocked`,
+  `ExternalObjectOrphaned`, `ReconcileError`, `RotationFailed`. The Event `reason` equals the
   condition reason where one exists.
 - The same facts go to the structured JSON log (who: the controller and, for
   a user-driven change, the last `managedFields` manager; what: kind,
@@ -472,7 +586,7 @@ name containing `.`).
 ### 13. FIPS (EB-14)
 
 - Releases are built with `GOFIPS140=v1.0.0` (the frozen validated module;
-  `latest` is the alternative, see G-api) and run with `GODEBUG=fips140=on`.
+  `latest` is not used for releases) and run with `GODEBUG=fips140=on`.
   The library uses only the standard library's crypto (`crypto/tls`,
   `crypto/sha256`, `crypto/rand`) and no cgo crypto, so the module in use is
   the Go Cryptographic Module ([Go FIPS 140-3]).
@@ -494,12 +608,20 @@ name containing `.`).
   needs persisted rotation state in every credential-bearing kind. In return
   a rotation never cuts off a running workload on a backend that can overlap,
   and the hard-cut backends are visible as such.
-- `Tenant` costs readability in some names (a hash suffix for namespaces with
-  a hyphen on `-` backends, and for long names) in exchange for collision
-  safety. A name's hash is not secret and a database administrator can
-  derive it.
-- Fail-closed `allowedNamespaces` means a new server serves no one until its
-  author lists namespaces, which is a deliberate extra step.
+- `Tenant` costs readability (every external name ends in a hash) in exchange
+  for one rule with no branches. A name's hash is not secret and a database
+  administrator can derive it. Backends without an ownership marker (Valkey)
+  rely on the 50-bit hash alone.
+- Fail-closed `allowedNamespaces` means a cluster server cannot be created
+  without choosing `All` or a `Selector`, which is a deliberate extra step. A
+  team that wants only its own namespace uses a namespaced server.
+- Credential-bearing kinds cannot be retained: a deleted claim never leaves a
+  live credential behind, unless its author omits `Delete` from
+  `managementPolicies`, which orphans it with a Warning Event. A user who
+  wants to keep a role or access key creates it outside the operator.
+- The default deletion policy of data kinds is a deployment setting, not part
+  of the CRD, so two clusters can differ. The effective value is in each
+  claim's status.
 - The operator namespace holds DCR registration Secrets, so a compromise of
   the operator namespace compromises every registered client; this is the
   same trust as the admin credential and is documented.
@@ -508,75 +630,50 @@ name containing `.`).
 - Open items: the values marked "not verified" and the 17 live checks from
   NR4 belong to the operators' NOxb items, not to this ADR.
 
-## Decisions for the user (G-api)
+## Decisions (G-api, 2026-11-01)
 
-Each is a proposal with its trade-off and the author's lean.
+The user decided the sixteen G-api choices on 2026-11-01. The sections above
+are written to these outcomes.
 
-1. **Two-phase rotation replaces `Rotate`** (section 8): `Rotator` with
-   `RotateBegin`/`RotateFinish`, a persisted `RotationState`, and three
-   new `Claim` methods. Trade-off: more interface and status for no outage at
-   rotation, against the single call that cannot overlap. Lean: accept.
-2. **`allowedNamespaces` shape**: a label selector that fails closed (absent
-   allows none, `{}` allows all), as in the plan. Alternative: Gateway API's
-   `from: Same | All | Selector`, more self-describing and safer by default,
-   but a second shape to learn. Lean: label selector, fail closed.
-3. **Namespaced `<Kind>Server` in `v1alpha1`**: ship both tiers in every group
-   now (as drafted, matching the plan), or only the cluster tier first.
-   Trade-off: the namespaced tier is a second kind per group to test and
-   document, but adding a kind later is not a breaking change and removing one
-   is. Lean: ship both as drafted, because the plan lists both and "bring your
-   own service" is a stated use case; cutting the namespaced tier is the
-   cheaper correction if it proves unused only before the first release.
-4. **`managementPolicies` vocabulary**: only `*` and `Observe`, or Crossplane's
-   `Create`, `Update`, `Delete`, `LateInitialize` as well. Lean: `*` and
-   `Observe`; the list shape leaves room.
-5. **`deletionPolicy` defaults**: the plan's group defaults (`Retain` for db
-   and s3) also apply to credential-bearing kinds (`DatabaseRole`,
-   `BucketAccess`), which leaves a live credential behind after the claim is
-   gone. Alternative: `Retain` only for data kinds (`Database`, `Bucket`) and
-   `Delete` for credential kinds in every group. Lean: the alternative.
-6. **Naming rules** (section 10): readable names with a hash only when
-   needed, against always appending the hash. Trade-off: readable names help
-   operators and DBAs, always-hash is simpler to reason about and has no
-   branch exclusion rule. Lean: the proposed readable-when-safe rules, with
-   the ownership marker.
-7. **Separator per backend**: `_` roles and databases, `-` buckets, clients,
-   MQTT users, `/` topics, `:` Valkey. The plan fixed buckets and clients at
-   `<ns>-<name>`. Lean: as proposed.
-8. **Binding types**: `redis` for Valkey (the core spec defines no types, so
-   `valkey` would be as valid) and craftainer-defined keys for all five
-   types beyond the spec's reserved entries; a `uri` key is added. Alternative: `valkey` as the type.
-   Lean: `redis` for client-library compatibility.
-9. **DCR state location**: operator namespace (tenant never sees the RAT;
-   removal by finalizer), against the claim's namespace (owner-reference
-   garbage collection, but the tenant can read the RAT). Lean: operator
-   namespace.
-10. **Durations and sizes**: `metav1.Duration` strings, as most operators do,
-    against integer fields with a unit suffix (`intervalSeconds`) as the API
-    conventions prefer for new APIs. Lean: `metav1.Duration`.
-11. **Shared API types**: duplicate the small `rotationPolicy` and status
-    structs in each operator, or add a `pkg/apis/common` package to
-    `lib-operator-go` with generated deep-copy so the five operators embed one
-    definition. Adding the package extends I1. Lean: the shared package.
-12. **`craftainer.dev/paused` annotation** (Crossplane's pause), to stop
-    reconciling without deleting. Lean: include it.
-13. **Graduation to `v1`**: the criteria in section 1 (one release of use,
-    envtest and Chainsaw green, two-release deprecation of `v1alpha1`).
-    Lean: accept.
-14. **FIPS build**: `GOFIPS140=v1.0.0` (validated, older) against `latest`
-    (newer, not yet validated); plus the `fips140=only` CI job. Lean:
-    `v1.0.0` for releases.
-15. **Audit log shape**: structured JSON log plus Events (section 11), with no
-    separate append-only audit sink in the operators. Lean: accept; the
-    cluster's API audit log and the SIEM export of the logs cover EB-4.
-16. **Kind names and the five groups' drafts** in
-    [`docs/crd-drafts.md`](../crd-drafts.md), including the COSI-aligned
-    S3 names (`ClusterObjectStore`, `ObjectStore`, `Bucket`, `BucketAccess`).
-    Lean: accept as drafted.
+1. Two-phase rotation replaces `Rotate` (section 8): accepted as proposed.
+2. `allowedNamespaces`: the Gateway API shape `from: All | Selector` with
+   `selector`, required on cluster servers so it fails closed; namespaced
+   servers are implicitly `Same` (section 2).
+3. Both server tiers ship in `v1alpha1`.
+4. `managementPolicies`: Crossplane's full set (`*`, `Observe`, `Create`,
+   `Update`, `Delete`, `LateInitialize`), default `["*"]` (section 5).
+   Judgement calls made in writing it down: `LateInitialize` records values in
+   `status`, not `spec`; an explicit list must contain `Observe`; an empty
+   list is invalid; and without `Delete` credentials are not deleted
+   (section 4).
+5. Deletion: credential-bearing kinds are always deleted and have no
+   `deletionPolicy`; data kinds keep `spec.deletionPolicy`, whose default is
+   the operator environment variable `DEFAULT_DATA_DELETION_POLICY`
+   (`Retain` when unset; an invalid value fails startup) and is reported in
+   `status` (section 4).
+6. Naming: the hash is always appended; the readable-when-safe branch and its
+   exclusion rule are gone; the ownership marker and per-backend length limits
+   stay (section 10).
+7. Separators per backend as proposed (section 10).
+8. Binding type `redis` for Valkey (section 7).
+9. DCR state lives in the operator namespace (section 9).
+10. Durations are `metav1.Duration`.
+11. Shared API types live in `lib-operator-go`'s `pkg/apis/common`. This
+    extends I1 (section 1).
+12. The `craftainer.dev/paused` annotation is included.
+13. Graduation to `v1` by the criteria in section 1.
+14. FIPS build `GOFIPS140=v1.0.0` for releases, plus the `fips140=only` CI job.
+15. Audit is the structured JSON log plus Events, with no separate sink
+    (section 11).
+16. Kind names and the five groups' drafts in
+    [`docs/crd-drafts.md`](../crd-drafts.md), including the COSI-aligned S3
+    names.
 
 ## Open issues
 
-New design questions found in review; not decided here.
+New design questions found in review; not decided here. Decision 4 closed
+the one on `Observe` with `rotationPolicy`: rotation needs `Update`
+(section 5).
 
 - Binding CA key: the spec reserves `certificates` (PEM chain) for TLS trust,
   while section 7 and the drafts use `sslrootcert`. Offer both, or only
@@ -584,7 +681,6 @@ New design questions found in review; not decided here.
 - A cache or broker without TLS inside a namespace (a test instance) is not
   expressible, because EB-14 requires TLS to every backend. Is a documented
   exception wanted?
-- `Observe` plus `rotationPolicy` on the same claim is not specified.
 - `proxyURL` may carry credentials (`http://user:pass@proxy`) into a plain spec
   field; reject userinfo by CEL, or add a Secret reference for proxy auth?
 - A namespaced server lets a tenant aim the operator at any host, port,
@@ -600,6 +696,7 @@ New design questions found in review; not decided here.
 [COSI]: https://github.com/kubernetes-sigs/container-object-storage-interface
 [Crossplane managed resources]: https://docs.crossplane.io/latest/managed-resources/managed-resources/
 [controller-runtime docs]: https://pkg.go.dev/sigs.k8s.io/controller-runtime
+[Gateway API AllowedRoutes]: https://gateway-api.sigs.k8s.io/reference/api-spec/1.6/spec/
 [CEL validation rules]: https://kubernetes.io/docs/tasks/extend-kubernetes/custom-resources/custom-resource-definitions/#validation-rules
 [K8s RBAC good practices]: https://kubernetes.io/docs/concepts/security/rbac-good-practices/
 [Pod Security Standards]: https://kubernetes.io/docs/concepts/security/pod-security-standards/
