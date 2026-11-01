@@ -245,16 +245,31 @@ dropping a condition it cannot evaluate).
   default for that object. The operators in `mqtt`, `cache` and `oidc` have no
   data kind; they still accept the variable (so one Helm value serves all
   five) but do not use it.
-- **The effective policy is observable.** On every reconcile the controller
-  writes `status.effectiveDeletionPolicy` (the policy in force at that
-  reconcile) and `status.deletionPolicySource` (`Spec` or `OperatorDefault`).
-  Status can lag: a claim that is paused or has a long poll interval does not
-  see an operator restart with a new default until its next reconcile, so
-  deletion re-resolves the value at that moment and a user who must be sure
-  sets `spec.deletionPolicy` explicitly. The controller
-  emits a Normal Event `DeletionPolicyResolved` when either value is first set
-  or changes, for example after the operator is restarted with another
-  default. The operator logs the configured default once at startup.
+- **The default is pinned at creation.** On its first reconcile a data
+  claim without `spec.deletionPolicy` gets the resolved default written to
+  `status.effectiveDeletionPolicy` with `status.deletionPolicySource:
+  OperatorDefault`, and the controller emits a Normal Event
+  `DeletionPolicyResolved`. Deletion honours that recorded value, never the
+  current environment variable, so changing `DEFAULT_DATA_DELETION_POLICY`
+  (and restarting the operator) affects only claims created afterwards.
+  Reconciles do not rewrite a recorded `OperatorDefault` value.
+- **An explicit `spec.deletionPolicy` wins and is read at deletion.** While
+  the field is set, `status.effectiveDeletionPolicy` mirrors it with source
+  `Spec` (updated on reconcile, with a `DeletionPolicyResolved` Event on a
+  change), but deletion uses the spec value itself, so an edit made just
+  before deleting counts even if status has not caught up. If the field is
+  later removed, the claim is pinned again from the current environment
+  variable at its next reconcile (source `OperatorDefault`, with a
+  `DeletionPolicyResolved` Event), because the original pin was overwritten
+  while the spec value was set. Judgement call, as above.
+- **If status was lost** (an object restored from a backup or applied again
+  without status, with no `spec.deletionPolicy`): the controller re-resolves
+  the default from the current environment variable, records it with source
+  `OperatorDefault`, and emits a Warning Event `DeletionPolicyRepinned`
+  saying the original pin is unknown. This is the author's judgement call,
+  not a user decision. A deletion that arrives before any reconcile has
+  re-pinned a status-less claim does the same resolution first.
+- The operator logs the configured default once at startup.
 - **Deletion outcome** (`P` is whether `managementPolicies` permits `Delete`):
 
   | Kind | `P` | Effective policy | External object | Event |
@@ -497,8 +512,8 @@ every PUT, because RFC 7592 lets the server return a new one.
 
 ### 10. Tenancy naming
 
-`naming.Tenant(ns, name string, maxLen int, sep string) string` derives every
-external name from the claim's namespace and name. It is the only tenancy
+`naming.Tenant(ns, name string, maxLen int, sep string, hl naming.HashLen)
+string` derives every external name from the claim's namespace and name. It is the only tenancy
 guard besides `server.Resolve` (NR4 5): an admin credential can name anything,
 so a wrong or colliding name is a cross-tenant incident. It has 100%
 statement and branch coverage and a property test.
@@ -510,22 +525,34 @@ re-validate them.
 
 Rules:
 
-1. `h` is the first 10 characters of the lower-case, unpadded base32 (RFC
-   4648, alphabet `a-z2-7`) of `SHA-256(len(ns) ":" ns ":" name)`. The length
-   prefix makes the input unambiguous. SHA-256 is FIPS-approved (EB-14).
+1. `hl` is `naming.HashShort` (10 characters, 50 bits) or `naming.HashLong`
+   (16 characters, 80 bits). `h` is the first `hl` characters of the
+   lower-case, unpadded base32 (RFC 4648, alphabet `a-z2-7`, 5 bits per
+   character) of `SHA-256(len(ns) ":" ns ":" name)`. The length prefix makes
+   the input unambiguous. SHA-256 is FIPS-approved (EB-14). The short hash is
+   a prefix of the long one for the same input.
 2. `readable = ns + sep + name`.
 3. **The hash is always appended.** The result is
-   `cut(readable, maxLen - len(sep) - 10) + sep + h`, where `cut` truncates
+   `cut(readable, maxLen - len(sep) - hl) + sep + h`, where `cut` truncates
    and then strips trailing `-`, `.`, `_`, `/` and `:` so no empty segment or
    double separator results. The result is never longer than `maxLen`, and
    there is no branch that returns `readable` unchanged.
 4. `Tenant` panics (a programmer error found by the first test run, never by
-   user input) when `maxLen < 16`, when `sep` is empty or longer than one
-   byte, or when `ns` or `name` is empty.
+   user input) when `maxLen < hl + len(sep) + 5` (16 with `HashShort`, 22
+   with `HashLong`), when `sep` is empty or longer than one byte, when `hl`
+   is neither constant, or when `ns` or `name` is empty.
+5. **Which length a backend uses.** A backend object that can hold the
+   ownership marker below uses `HashShort`. A backend object that cannot
+   hold one uses `HashLong`, because the name is then the only barrier. The
+   markerless objects are: Valkey ACL users, RustFS users and service
+   accounts (the S3 credential kinds), and DCR client names. Every other
+   row of the table below has a marker and uses `HashShort`.
 
-Example: `Tenant("team-a", "orders", 63, "_")` is `team-a_orders_gdeqxvirep`
-and `Tenant("team-a", "orders", 63, "-")` is `team-a-orders-gdeqxvirep` (the
-hash does not depend on `sep`).
+Example: `Tenant("team-a", "orders", 63, "_", HashShort)` is
+`team-a_orders_gdeqxvirep`, `Tenant("team-a", "orders", 63, "-", HashShort)`
+is `team-a-orders-gdeqxvirep` (the hash does not depend on `sep`), and
+`Tenant("team-a", "orders", 128, ":", HashLong)` is
+`team-a:orders:gdeqxvirepf7uebv`.
 
 Why these rules are collision-safe:
 
@@ -535,35 +562,40 @@ Why these rules are collision-safe:
   `-` backend). Every result ends in `sep` and a hash, so no result is a bare
   tenant-chosen string, and a tenant cannot pick a claim name that lands on
   another tenant's object without matching its hash.
-- Two pairs collide only if their 50-bit hashes match and their visible
-  prefixes match: a second-preimage search of about 2^50 SHA-256 evaluations
-  against a chosen victim. Because every name is hashed, this is the only
-  barrier on a backend with no ownership marker. As defence in depth, every
-  external object created by an operator carries an ownership marker
-  (`craftainer.dev/claim=<ns>/<name>/<uid>`) where the backend can hold one
-  (PostgreSQL `COMMENT ON ROLE/DATABASE`, S3 bucket tags, Keycloak client
-  attributes, Mosquitto client `textdescription`; Valkey ACL users cannot, so
-  they rely on the name alone). Create and Observe refuse an object whose
-  marker names a different UID (`NameCollision`).
+- Two pairs collide only if their hashes match and their visible prefixes
+  match: a second-preimage search against a chosen victim of about 2^50
+  SHA-256 evaluations for `HashShort` and about 2^80 for `HashLong`. Where the
+  backend can hold an ownership marker, the marker is the second barrier, so
+  50 bits suffice. Every external object created by an operator carries the
+  marker (`craftainer.dev/claim=<ns>/<name>/<uid>`) where the backend can
+  hold one (PostgreSQL `COMMENT ON ROLE/DATABASE`, S3 bucket tags, Keycloak
+  client attributes, Mosquitto client `textdescription`). Valkey ACL users,
+  RustFS users and service accounts, and DCR client names cannot hold one, so
+  for them the name is the only barrier and they use the 80-bit hash. Create
+  and Observe refuse an object whose marker names a different UID
+  (`NameCollision`).
 
 Callers subtract any suffix they append from `maxLen` (the rotation suffixes
 `_a`, `_b`, `-a`, `-b` are two bytes). Per backend:
 
-| Backend object | `sep` | `maxLen` passed | Limit and where it comes from |
-| --- | --- | --- | --- |
-| PostgreSQL database, owner role | `_` | 63 (login roles: 61, then `_a`/`_b`) | identifier limit of 63 bytes (`NAMEDATALEN` 64 minus the terminator, [PostgreSQL docs]); always quoted with `pgx.Identifier` since `-` is legal only quoted |
-| S3 bucket (RustFS) | `-` | 63 | bucket names are 3 to 63 lowercase characters, digits, hyphens; every result ends in the hash, which is alphanumeric |
-| S3 user and service account (RustFS) | `-` | 63 (not verified, see below) | service-account secret keys at most 40 characters (NR4); the access-key and user-name bounds are not in the NR4 findings |
-| MQTT username and client id (Mosquitto) | `-` | 128, then `-a`/`-b` (126) | the MQTT string limit is 65535 bytes; 128 is our cap |
-| MQTT topic root | `/` | not derived by `Tenant` | the root is `<ns>/` (no hash, no truncation), so tenant ACL patterns are `<ns>/...` |
-| Valkey ACL username | `:` | 128 | no hard limit; our cap. Key pattern `~<ns>:*`, channel pattern `&<ns>:*` (these patterns use the namespace, not the hashed name) |
-| Keycloak client id | `-` | 255 | `CLIENT_ID` column is 255 characters (verify in NOxb) |
-| DCR client name | `-` | 255 | free text; our cap |
-| Kubernetes Secret and object names | n/a | 253 | DNS-1123 subdomain; not derived by `Tenant` |
+| Backend object | `sep` | `hl` | `maxLen` passed | Limit and where it comes from |
+| --- | --- | --- | --- | --- |
+| PostgreSQL database, owner role | `_` | `HashShort` | 63 (login roles: 61, then `_a`/`_b`) | identifier limit of 63 bytes (`NAMEDATALEN` 64 minus the terminator, [PostgreSQL docs]); always quoted with `pgx.Identifier` since `-` is legal only quoted |
+| S3 bucket (RustFS) | `-` | `HashShort` | 63 | bucket names are 3 to 63 lowercase characters, digits, hyphens; every result ends in the hash, which is alphanumeric |
+| S3 user and service account (RustFS) | `-` | `HashLong` | 63 (not verified, see below) | service-account secret keys at most 40 characters (NR4); the access-key and user-name bounds are not in the NR4 findings |
+| MQTT username and client id (Mosquitto) | `-` | `HashShort` | 128, then `-a`/`-b` (126) | the MQTT string limit is 65535 bytes; 128 is our cap |
+| MQTT topic root | `/` | n/a | not derived by `Tenant` | the root is `<ns>/` (no hash, no truncation), so tenant ACL patterns are `<ns>/...` |
+| Valkey ACL username | `:` | `HashLong` | 128 | no hard limit; our cap. Key pattern `~<ns>:*`, channel pattern `&<ns>:*` (these patterns use the namespace, not the hashed name) |
+| Keycloak client id | `-` | `HashShort` | 255 | `CLIENT_ID` column is 255 characters (verify in NOxb) |
+| DCR client name | `-` | `HashLong` | 255 | free text; our cap |
+| Kubernetes Secret and object names | n/a | n/a | 253 | DNS-1123 subdomain; not derived by `Tenant` |
 
 The two limits marked "not verified" are added to that operator's NOxb open
 checks. If a backend turns out shorter, only the `maxLen` constant changes:
-the rules do not.
+the rules do not. The long hash needs `maxLen` of at least 22; every
+`HashLong` row passes 63 or more, so that holds unless the RustFS user-name
+limit turns out below 22, in which case the item escalates instead of
+shortening the hash.
 
 A claim can never choose an external name: there is no `spec.name` override,
 so the derived name is the only path from a claim to a backend object.
@@ -578,7 +610,7 @@ name containing `.`).
   `Observed`, `Retained`, `DeletionPolicyResolved`, `RotationStarted`,
   `RotationFinished`, `RotatedWithoutOverlap`; Warning `ServerUnreachable`,
   `NamespaceNotAllowed`, `NameCollision`, `ManagementPolicyBlocked`,
-  `ExternalObjectOrphaned`, `ReconcileError`, `RotationFailed`. The Event `reason` equals the
+  `ExternalObjectOrphaned`, `DeletionPolicyRepinned`, `ReconcileError`, `RotationFailed`. The Event `reason` equals the
   condition reason where one exists.
 - The same facts go to the structured JSON log (who: the controller and, for
   a user-driven change, the last `managedFields` manager; what: kind,
@@ -636,8 +668,9 @@ name containing `.`).
   and the hard-cut backends are visible as such.
 - `Tenant` costs readability (every external name ends in a hash) in exchange
   for one rule with no branches. A name's hash is not secret and a database
-  administrator can derive it. Backends without an ownership marker (Valkey)
-  rely on the 50-bit hash alone.
+  administrator can derive it. Backends without an ownership marker (Valkey
+  ACL users, RustFS users and service accounts, DCR client names) use the
+  80-bit hash, which takes names six characters longer than the 50-bit one.
 - Fail-closed `allowedNamespaces` means a cluster server cannot be created
   without choosing `All` or a `Selector`, which is a deliberate extra step. A
   team that wants only its own namespace uses a namespaced server.
@@ -672,17 +705,25 @@ are written to these outcomes.
    decide them: `LateInitialize` records values in `status.lateInitialized`,
    not `spec`; an explicit list must contain `Observe`; an empty list is
    invalid; without `Delete` credentials are not deleted (section 4); a
-   paused claim is still deleted; deletion re-resolves the data kinds' default
-   at that moment; a `Selector` may not be empty; an orphaned DCR client
-   keeps its registration Secret.
+   paused claim is still deleted; a `Selector` may not be empty; an orphaned
+   DCR client keeps its registration Secret.
 5. Deletion: credential-bearing kinds are always deleted and have no
    `deletionPolicy`; data kinds keep `spec.deletionPolicy`, whose default is
    the operator environment variable `DEFAULT_DATA_DELETION_POLICY`
    (`Retain` when unset; an invalid value fails startup) and is reported in
-   `status` (section 4).
+   `status` (section 4). Follow-up decision (GA1b, 2026-11-01): the default is
+   pinned at creation. The first reconcile records it in
+   `status.effectiveDeletionPolicy`, and deletion honours the recorded value,
+   not the current variable; an explicit `spec.deletionPolicy` wins and is
+   read at deletion. For a claim whose status was lost, the controller
+   re-resolves and emits a Warning Event; that is the author's judgement call,
+   not the user's, and so is re-pinning when `spec.deletionPolicy` is removed.
 6. Naming: the hash is always appended; the readable-when-safe branch and its
    exclusion rule are gone; the ownership marker and per-backend length limits
-   stay (section 10).
+   stay (section 10). Follow-up decision (GA1b, 2026-11-01): backends with no
+   ownership marker (Valkey ACL users, RustFS users and service accounts, DCR
+   client names) use an 80-bit hash (16 base32 characters); marker-bearing
+   backends keep the 50-bit hash.
 7. Separators per backend as proposed (section 10).
 8. Binding type `redis` for Valkey (section 7).
 9. DCR state lives in the operator namespace (section 9).

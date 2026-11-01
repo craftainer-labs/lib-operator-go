@@ -110,11 +110,13 @@ Data kinds add:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `effectiveDeletionPolicy` | enum | `Delete` or `Retain`: the policy deletion will use now |
+| `effectiveDeletionPolicy` | enum | `Delete` or `Retain`. With source `OperatorDefault` it is the default pinned at the claim's first reconcile, and deletion honours it, not the current env var. With source `Spec` it mirrors `spec.deletionPolicy`, which deletion reads directly |
 | `deletionPolicySource` | enum | `Spec` or `OperatorDefault` |
 
-The controller sets both on every reconcile and emits the Normal Event
-`DeletionPolicyResolved` when either changes.
+The first reconcile pins the default and emits the Normal Event
+`DeletionPolicyResolved`; later reconciles do not rewrite an `OperatorDefault`
+value. Lost status is re-pinned from the current env var with the Warning
+Event `DeletionPolicyRepinned` (ADR 0002 section 4).
 
 Credential-bearing kinds add:
 
@@ -139,8 +141,9 @@ Credential-bearing kinds add:
 
 Every operator reads the environment variable `DEFAULT_DATA_DELETION_POLICY`
 (`Retain` or `Delete`; unset or empty means `Retain`; anything else fails
-startup). It is the `deletionPolicy` of a data kind whose spec leaves the
-field unset. Only `operator-db` and `operator-s3` have data kinds.
+startup). It is the `deletionPolicy` that a new data claim whose spec leaves
+the field unset gets pinned to at its first reconcile; changing it later
+affects only claims created afterwards. Only `operator-db` and `operator-s3` have data kinds.
 
 ## Group `db.craftainer.dev` (operator-db, PostgreSQL)
 
