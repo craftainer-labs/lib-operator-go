@@ -27,8 +27,8 @@ func TestTrackerReportsChangedFieldsAndSums(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(changed, []string{"count", "size"}) || oldSum != "" || len(newSum) != 64 {
-		t.Errorf("first sight: %v %q %q", changed, oldSum, newSum)
+	if changed != nil || oldSum != "" || len(newSum) != 64 {
+		t.Errorf("first sight: %v %q %q; want no previous spec rather than every field changed", changed, oldSum, newSum)
 	}
 
 	changed, old2, new2, err := tr.Observe("uid", spec{Size: "s", Count: 1})
@@ -55,6 +55,31 @@ func TestTrackerReportsChangedFieldsAndSums(t *testing.T) {
 	if _, old, _, _ := tr.Observe("uid", spec{Size: "m"}); old != "" {
 		t.Errorf("after Forget: %q", old)
 	}
+}
+
+func TestTrackerNotices(t *testing.T) {
+	tr := audit.NewTracker()
+	if !tr.Notice("uid", "poll", "soon") {
+		t.Error("the first value is new")
+	}
+	if tr.Notice("uid", "poll", "soon") {
+		t.Error("the same value is not new")
+	}
+	if !tr.Notice("uid", "poll", "later") {
+		t.Error("a changed value is new")
+	}
+	if !tr.Notice("other", "poll", "later") || !tr.Notice("uid", "another", "later") {
+		t.Error("notices are per object and per key")
+	}
+	tr.Clear("uid", "poll")
+	if !tr.Notice("uid", "poll", "later") {
+		t.Error("after Clear the value is new again")
+	}
+	tr.Forget("uid")
+	if !tr.Notice("uid", "poll", "later") {
+		t.Error("after Forget the value is new again")
+	}
+	tr.Clear("nobody", "poll") // clearing what was never noticed is fine
 }
 
 func TestTrackerErrors(t *testing.T) {
@@ -105,7 +130,7 @@ func TestLogWritesTheEntry(t *testing.T) {
 	audit.Log(ctx, audit.Entry{
 		Controller: "operator-db", LastManager: "kubectl", Kind: "Database", Namespace: "team-a", Name: "orders",
 		UID: "uid-1", Generation: 4, ExternalName: "team-a_orders_x", Action: "Create", Result: "success",
-		ServerRef: "ClusterDatabaseServer/shared", ServerHost: "pg.example", ChangedFields: []string{"extensions"},
+		ServerRef: "ClusterDatabaseServer/shared", ServerHost: "pg.example", ChangedFields: []string{"extensions"}, PreviousUnknown: true,
 		OldSpecSHA256: "old", NewSpecSHA256: "new",
 	})
 	if len(lines) != 1 {
@@ -113,7 +138,7 @@ func TestLogWritesTheEntry(t *testing.T) {
 	}
 	for _, want := range []string{`"msg":"audit"`, `"controller":"operator-db"`, `"lastManager":"kubectl"`, `"kind":"Database"`,
 		`"uid":"uid-1"`, `"generation":4`, `"action":"Create"`, `"serverHost":"pg.example"`,
-		`"changedFields":["extensions"]`, `"oldSpecSHA256":"old"`, `"newSpecSHA256":"new"`} {
+		`"changedFields":["extensions"]`, `"previousUnknown":true`,`"oldSpecSHA256":"old"`, `"newSpecSHA256":"new"`} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("log line lacks %s: %s", want, lines[0])
 		}

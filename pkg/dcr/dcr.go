@@ -14,7 +14,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
@@ -70,28 +72,53 @@ func (s Store) key(claim client.Object) types.NamespacedName {
 	return types.NamespacedName{Namespace: s.Namespace, Name: SecretName(claim.GetUID())}
 }
 
-// Write creates or replaces the claim's state. Call it again after every PUT:
-// RFC 7592 lets the server return a new token.
+// ErrConcurrentUpdate means another writer stored a newer registration token
+// while Write was running; Write does not overwrite it. Read the state again.
+var ErrConcurrentUpdate = errors.New("another writer stored a newer registration token")
+
+// Write creates the claim's state, or merges st into the existing Secret with
+// optimistic concurrency: it keeps the Secret's other labels (including
+// craftainer.dev/orphaned), retries on a conflict, and returns
+// ErrConcurrentUpdate instead of overwriting a registration token that
+// changed under it. Call it again after every PUT: RFC 7592 lets the server
+// return a new token.
 func (s Store) Write(ctx context.Context, claim client.Object, st State) error {
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
-		Name:      s.key(claim).Name,
-		Namespace: s.Namespace,
-		Labels: map[string]string{
-			binding.LabelManagedBy: s.ManagedBy,
-			LabelClaimNamespace:    claim.GetNamespace(),
-			LabelClaimName:         claim.GetName(),
-			LabelClaimUID:          string(claim.GetUID()),
-		},
-	}, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{
-		KeyClientID:              []byte(st.ClientID),
-		KeyRegistrationClientURI: []byte(st.RegistrationClientURI),
-		KeyRegistrationToken:     []byte(st.RegistrationAccessToken),
-	}}
-	err := s.Client.Create(ctx, secret)
-	if apierrors.IsAlreadyExists(err) {
-		err = s.Client.Update(ctx, secret)
-	}
-	return err
+	first, base := true, ""
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var cur corev1.Secret
+		err := s.Client.Get(ctx, s.key(claim), &cur)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		token := string(cur.Data[KeyRegistrationToken])
+		switch {
+		case first:
+			first, base = false, token
+		case token != base && token != st.RegistrationAccessToken:
+			return ErrConcurrentUpdate
+		}
+		cur.Name, cur.Namespace, cur.Type = s.key(claim).Name, s.Namespace, corev1.SecretTypeOpaque
+		if cur.Labels == nil {
+			cur.Labels = map[string]string{}
+		}
+		cur.Labels[binding.LabelManagedBy] = s.ManagedBy
+		cur.Labels[LabelClaimNamespace] = claim.GetNamespace()
+		cur.Labels[LabelClaimName] = claim.GetName()
+		cur.Labels[LabelClaimUID] = string(claim.GetUID())
+		cur.Data = map[string][]byte{
+			KeyClientID:              []byte(st.ClientID),
+			KeyRegistrationClientURI: []byte(st.RegistrationClientURI),
+			KeyRegistrationToken:     []byte(st.RegistrationAccessToken),
+		}
+		if apierrors.IsNotFound(err) {
+			err = s.Client.Create(ctx, &cur)
+			if apierrors.IsAlreadyExists(err) { // lost a create race: read again
+				return apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, cur.Name, err)
+			}
+			return err
+		}
+		return s.Client.Update(ctx, &cur)
+	})
 }
 
 // Read returns the claim's state, or ErrNotFound.
@@ -120,16 +147,18 @@ func (s Store) Delete(ctx context.Context, claim client.Object) error {
 // the client stays manageable through RFC 7592. It returns ErrNotFound when
 // there is no state.
 func (s Store) Orphan(ctx context.Context, claim client.Object) error {
-	var secret corev1.Secret
-	if err := s.Client.Get(ctx, s.key(claim), &secret); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ErrNotFound
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var secret corev1.Secret
+		if err := s.Client.Get(ctx, s.key(claim), &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return ErrNotFound
+			}
+			return err
 		}
-		return err
-	}
-	if secret.Labels == nil {
-		secret.Labels = map[string]string{}
-	}
-	secret.Labels[LabelOrphaned] = "true"
-	return s.Client.Update(ctx, &secret)
+		if secret.Labels == nil {
+			secret.Labels = map[string]string{}
+		}
+		secret.Labels[LabelOrphaned] = "true"
+		return s.Client.Update(ctx, &secret)
+	})
 }

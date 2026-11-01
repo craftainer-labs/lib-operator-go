@@ -615,11 +615,11 @@ func TestLateInitialize(t *testing.T) {
 			[]string{"Observe", "LateInitialize"}, map[string]string{"a": "b"}, false},
 		{"not asked for without the policy", policyWith("Observe", "Create", "Update"), func() lifecycle.External[spec, obj] { return late(map[string]string{"a": "b"}, nil) },
 			[]string{"Observe"}, nil, false},
-		{"not asked for before the object exists", policyWith("*"), func() lifecycle.External[spec, obj] {
+		{"recorded in the create reconcile, from the observation after it", policyWith("*"), func() lifecycle.External[spec, obj] {
 			f := late(map[string]string{"a": "b"}, nil)
 			f.Obs = lifecycle.Observation[obj]{}
 			return f
-		}, []string{"Observe", "Create"}, nil, false},
+		}, []string{"Observe", "Create", "Observe", "LateInitialize"}, map[string]string{"a": "b"}, false},
 		{"an External without it accepts the policy and does nothing", policyWith("*"), func() lifecycle.External[spec, obj] { return existing() },
 			[]string{"Observe"}, nil, false},
 		{"an error fails the reconcile", policyWith("*"), func() lifecycle.External[spec, obj] { return late(nil, boom) },
@@ -682,13 +682,15 @@ func TestAuditLog(t *testing.T) {
 	}
 	for _, want := range []string{`"action":"Create"`, `"result":"success"`, `"kind":"Widget"`, `"namespace":"ns"`, `"name":"w"`,
 		`"uid":"uid-w"`, `"controller":"operator-test"`, `"serverRef":"ClusterWidgetServer/shared"`, `"serverHost":"backend.example"`,
-		`"changedFields":["size"]`} {
+		`"previousUnknown":true`} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("create line lacks %s: %s", want, lines[0])
 		}
 	}
+	// The steady reconcile in between still fingerprinted the spec, so the
+	// update line knows the previous spec and reports only what changed.
 	if !strings.Contains(lines[1], `"action":"Update"`) || !strings.Contains(lines[1], `"changedFields":["size"]`) ||
-		strings.Contains(lines[1], `"oldSpecSHA256":""`) {
+		!strings.Contains(lines[1], `"previousUnknown":false`) || strings.Contains(lines[1], `"oldSpecSHA256":""`) {
 		t.Errorf("update line = %s", lines[1])
 	}
 	if strings.Contains(lines[1], `"m"`) || strings.Contains(lines[1], `"s"`) {
@@ -757,4 +759,201 @@ func TestNoSecretDataInEventsLogsConditionsOrStatus(t *testing.T) {
 	if string(h.secret("g").Data["password"]) != secrets[0] {
 		t.Error("the binding Secret itself must hold the value")
 	}
+}
+
+// scripted is an External whose Observe answers come from a list, so a test can
+// say what the observation after a Create looks like.
+type scripted struct {
+	fakeLate
+	script []lifecycle.Observation[obj]
+	errs   []error
+	n      int
+}
+
+func (s *scripted) Observe(ctx context.Context, sp spec) (lifecycle.Observation[obj], error) {
+	_, _ = s.fakeLate.Observe(ctx, sp)
+	i := s.n
+	s.n++
+	if i < len(s.errs) && s.errs[i] != nil {
+		return lifecycle.Observation[obj]{}, s.errs[i]
+	}
+	return s.script[i], nil
+}
+
+func TestLateInitializeAfterACreate(t *testing.T) {
+	boom := errors.New("observe boom")
+	created := lifecycle.Observation[obj]{Exists: true, UpToDate: true, Current: "created"}
+	newPinned := func(t *testing.T) *harness {
+		return newHarness(t, nil, widget(withFinalizer, pinned(common.DeletionRetain, common.SourceOperatorDefault)))
+	}
+
+	t.Run("the object created is the one handed to LateInitialize", func(t *testing.T) {
+		h := newPinned(t)
+		ext := &scripted{script: []lifecycle.Observation[obj]{{}, created}}
+		ext.Values = map[string]string{"region": "eu"}
+		if _, err := h.reconcileWidget(ext, h.dataOpts()); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.widget("w").Status.LateInitialized["region"]; got != "eu" {
+			t.Errorf("lateInitialized = %v", h.widget("w").Status.LateInitialized)
+		}
+	})
+	t.Run("the observation after the create fails", func(t *testing.T) {
+		h := newPinned(t)
+		ext := &scripted{script: []lifecycle.Observation[obj]{{}, {}}, errs: []error{nil, boom}}
+		if _, err := h.reconcileWidget(ext, h.dataOpts()); !errors.Is(err, boom) {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("nothing to record when the object is not there after the create", func(t *testing.T) {
+		h := newPinned(t)
+		ext := &scripted{script: []lifecycle.Observation[obj]{{}, {}}}
+		ext.Values = map[string]string{"region": "eu"}
+		if _, err := h.reconcileWidget(ext, h.dataOpts()); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.widget("w").Status.LateInitialized; len(got) != 0 {
+			t.Errorf("lateInitialized = %v", got)
+		}
+	})
+}
+
+// A pin is not a completed reconcile: it must not stamp observedGeneration or
+// lastReconcileTime (ADR 0002 section 3).
+func TestPinDoesNotStampACompletedReconcile(t *testing.T) {
+	boom := errors.New("finalizer boom")
+	h := newHarness(t, &interceptor.Funcs{Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+		return boom
+	}}, widget())
+	if _, err := h.reconcileWidget(missing(), h.dataOpts()); !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	w := h.widget("w")
+	if w.Status.EffectiveDeletionPolicy == "" {
+		t.Fatal("the pin was not written")
+	}
+	if w.Status.ObservedGeneration != 0 || w.Status.LastReconcileTime != nil {
+		t.Errorf("observedGeneration %d, lastReconcileTime %v: a pin is not a completed reconcile",
+			w.Status.ObservedGeneration, w.Status.LastReconcileTime)
+	}
+	wantCond(t, w.Status.Conditions, synced, metav1.ConditionUnknown, conditions.Reconciling)
+}
+
+func TestInvalidPollIntervalWarnsWhenTheValueChanges(t *testing.T) {
+	annotate := func(v string) func(*testWidget) {
+		return func(w *testWidget) {
+			w.Annotations = map[string]string{lifecycle.AnnotationPaused: "true", lifecycle.AnnotationPollInterval: v}
+		}
+	}
+	h := newHarness(t, nil, widget(annotate("soon")))
+	count := func() int {
+		n := 0
+		for _, r := range h.rec.Reasons() {
+			if r == conditions.EventInvalidPollInterval {
+				n++
+			}
+		}
+		return n
+	}
+	reconcile := func() {
+		if _, err := h.reconcileWidget(nil, h.dataOpts()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := func(v *string) {
+		w := h.widget("w")
+		if v == nil {
+			delete(w.Annotations, lifecycle.AnnotationPollInterval)
+		} else {
+			w.Annotations[lifecycle.AnnotationPollInterval] = *v
+		}
+		if err := h.c.Update(h.ctx, w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	str := func(v string) *string { return &v }
+
+	reconcile()
+	reconcile()
+	reconcile()
+	if count() != 1 {
+		t.Errorf("warnings after three reconciles with one bad value = %d, want 1", count())
+	}
+	set(str("later"))
+	reconcile()
+	reconcile()
+	if count() != 2 {
+		t.Errorf("warnings after the value changed = %d, want 2", count())
+	}
+	set(str("1h")) // valid again
+	reconcile()
+	set(str("later")) // the same bad value as before is a change from a good one
+	reconcile()
+	if count() != 3 {
+		t.Errorf("warnings after good then bad = %d, want 3", count())
+	}
+	set(nil)
+	reconcile()
+	set(str("later"))
+	reconcile()
+	if count() != 4 {
+		t.Errorf("warnings after removing and re-adding = %d, want 4", count())
+	}
+}
+
+func TestAuditEntriesAreForgottenForClaimsThatDisappear(t *testing.T) {
+	seed := func(h *harness) {
+		t.Helper()
+		if _, _, _, err := h.audit.Observe("uid-w", spec{Size: "s"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	known := func(h *harness) bool {
+		_, old, _, _ := h.audit.Observe("uid-w", spec{Size: "s"})
+		return old != ""
+	}
+	prepinned := widget(withFinalizer, pinned(common.DeletionRetain, common.SourceOperatorDefault))
+
+	t.Run("the pin cannot be written", func(t *testing.T) {
+		h := newHarness(t, nil) // the claim is not in the API server
+		seed(h)
+		if _, err := lifecycle.Reconcile(h.ctx, h.c, widget(), spec{Size: "s"}, lifecycle.External[spec, obj](missing()), h.dataOpts()); err == nil {
+			t.Error("expected an error")
+		}
+		if known(h) {
+			t.Error("the tracker still knows a claim that is gone")
+		}
+	})
+	t.Run("the finalizer cannot be added", func(t *testing.T) {
+		h := newHarness(t, nil)
+		seed(h)
+		g := gadget()
+		g.UID = "uid-w"
+		if _, err := lifecycle.Reconcile(h.ctx, h.c, g, spec{Size: "s"}, lifecycle.External[spec, obj](missing()), h.credOpts()); err == nil {
+			t.Error("expected an error")
+		}
+		if known(h) {
+			t.Error("the tracker still knows a claim that is gone")
+		}
+	})
+	t.Run("the status cannot be written at the end", func(t *testing.T) {
+		h := newHarness(t, nil)
+		seed(h)
+		if _, err := lifecycle.Reconcile(h.ctx, h.c, prepinned, spec{Size: "s"}, lifecycle.External[spec, obj](existing()), h.dataOpts()); err == nil {
+			t.Error("expected an error")
+		}
+		if known(h) {
+			t.Error("the tracker still knows a claim that is gone")
+		}
+	})
+	t.Run("a live claim stays known", func(t *testing.T) {
+		h := newHarness(t, nil, prepinned.DeepCopy())
+		seed(h)
+		if _, err := h.reconcileWidget(existing(), h.dataOpts()); err != nil {
+			t.Fatal(err)
+		}
+		if !known(h) {
+			t.Error("a live claim was forgotten")
+		}
+	})
 }

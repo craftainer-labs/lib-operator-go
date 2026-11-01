@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -10,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
@@ -60,7 +62,7 @@ func (h *harness) rotationAt(ext lifecycle.External[spec, obj], at time.Time) er
 }
 
 func TestRotationDueByInterval(t *testing.T) {
-	h := newHarness(t, nil, gadget(withPolicy(hours(1), nil)))
+	h := newHarness(t, nil, boundSecret(), gadget(withPolicy(hours(1), nil)))
 	rot := existingRot()
 	if err := h.rotationAt(rot, now); err != nil {
 		t.Fatal(err)
@@ -89,7 +91,7 @@ func TestRotationDueByInterval(t *testing.T) {
 
 func TestRotationGracePeriodHoldsAndRequeuesAtRetireAfter(t *testing.T) {
 	grace := &metav1.Duration{Duration: 5 * time.Minute}
-	h := newHarness(t, nil, gadget(withPolicy(hours(1), grace)))
+	h := newHarness(t, nil, boundSecret(), gadget(withPolicy(hours(1), grace)))
 	rot := existingRot()
 	opts := h.credOpts()
 	res, err := h.reconcileGadget(rot, opts)
@@ -106,7 +108,7 @@ func TestRotationGracePeriodHoldsAndRequeuesAtRetireAfter(t *testing.T) {
 }
 
 func TestRotationFinishesAfterTheGracePeriod(t *testing.T) {
-	h := newHarness(t, nil, gadget(trigger("go")))
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("go")))
 	rot := existingRot()
 	if err := h.rotationAt(rot, now); err != nil {
 		t.Fatal(err)
@@ -137,7 +139,7 @@ func TestRotationFinishesAfterTheGracePeriod(t *testing.T) {
 }
 
 func TestSecondRotationRetiresTheFirstGeneration(t *testing.T) {
-	h := newHarness(t, nil, gadget(withPolicy(hours(1), nil),
+	h := newHarness(t, nil, boundSecret(), gadget(withPolicy(hours(1), nil),
 		withRotation(common.RotationStatus{Active: "gen-1", Sequence: 1, LastRotated: ts(now.Add(-2 * time.Hour))})))
 	rot := existingRot()
 	rot.NextGeneration = "gen-2"
@@ -177,7 +179,7 @@ func TestRotationIntervalCounting(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newHarness(t, nil, gadget(tt.mut...))
+			h := newHarness(t, nil, boundSecret(), gadget(tt.mut...))
 			rot := existingRot()
 			if err := h.rotationAt(rot, now); err != nil {
 				t.Fatal(err)
@@ -190,7 +192,7 @@ func TestRotationIntervalCounting(t *testing.T) {
 }
 
 func TestRotationOnTheTriggerAnnotation(t *testing.T) {
-	h := newHarness(t, nil, gadget(trigger("one")))
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("one")))
 	rot := existingRot()
 	if err := h.rotationAt(rot, now); err != nil {
 		t.Fatal(err)
@@ -223,8 +225,10 @@ func TestRotationOnTheTriggerAnnotation(t *testing.T) {
 	}
 }
 
-func TestNoNewRotationDuringTheGracePeriod(t *testing.T) {
-	h := newHarness(t, nil, gadget(withPolicy(hours(1), nil), trigger("new"),
+// A trigger that arrives during the grace period is consumed and rejected with
+// a Warning, and does not rotate later (ADR 0002, section 8).
+func TestTriggerDuringTheGracePeriodIsConsumedAndRejected(t *testing.T) {
+	h := newHarness(t, nil, boundSecret(), gadget(withPolicy(hours(48), nil), trigger("new"),
 		withRotation(common.RotationStatus{Active: "gen-1", Previous: "gen-0", Sequence: 1,
 			RetireAfter: ts(now.Add(30 * time.Minute)), LastRotated: ts(now.Add(-30 * time.Minute)), LastTrigger: "old"})))
 	rot := existingRot()
@@ -234,10 +238,41 @@ func TestNoNewRotationDuringTheGracePeriod(t *testing.T) {
 	if n := len(rot.BeginStates()); n != 0 {
 		t.Errorf("RotateBegin calls = %d, want 0 while Previous is set", n)
 	}
+	rs := h.gadget("g").Status.Rotation
+	if rs.LastTrigger != "new" || rs.Previous != "gen-0" || rs.RetireAfter == nil {
+		t.Errorf("status.rotation = %+v: the trigger is consumed, the grace state kept", rs)
+	}
+	h.rec.AssertEvent(t, corev1.EventTypeWarning, conditions.EventRotationDeferred, "set a new value")
+
+	// The same reconcile finishes the grace period when it is over, and the
+	// consumed value does not start a rotation afterwards.
+	if err := h.rotationAt(rot, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.rotationAt(rot, now.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rot.BeginStates()); n != 0 || len(rot.FinishStates()) != 1 {
+		t.Errorf("RotateBegin %d, RotateFinish %d", n, len(rot.FinishStates()))
+	}
+	h.rec.AssertReasons(t, conditions.EventRotationDeferred, conditions.EventObserved, conditions.EventRotationFinished)
+}
+
+func TestRotationTriggerWhoseGraceEndsInTheSameReconcile(t *testing.T) {
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("new"),
+		withRotation(common.RotationStatus{Active: "gen-1", Previous: "gen-0", RetireAfter: ts(now.Add(-time.Minute)), LastTrigger: "old"})))
+	rot := existingRot()
+	if err := h.rotationAt(rot, now); err != nil {
+		t.Fatal(err)
+	}
+	rs := h.gadget("g").Status.Rotation
+	if len(rot.BeginStates()) != 0 || len(rot.FinishStates()) != 1 || rs.LastTrigger != "new" || rs.Previous != "" {
+		t.Errorf("begin %d finish %d rotation %+v", len(rot.BeginStates()), len(rot.FinishStates()), rs)
+	}
 }
 
 func TestGraceWithoutRetireAfterFinishesAtOnce(t *testing.T) {
-	h := newHarness(t, nil, gadget(withRotation(common.RotationStatus{Active: "gen-1", Previous: "gen-0", Sequence: 1})))
+	h := newHarness(t, nil, boundSecret(), gadget(withRotation(common.RotationStatus{Active: "gen-1", Previous: "gen-0", Sequence: 1})))
 	rot := existingRot()
 	if err := h.rotationAt(rot, now); err != nil {
 		t.Fatal(err)
@@ -248,7 +283,7 @@ func TestGraceWithoutRetireAfterFinishesAtOnce(t *testing.T) {
 }
 
 func TestHardCutRotation(t *testing.T) {
-	h := newHarness(t, nil, gadget(trigger("go")))
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("go")))
 	rot := existingRot()
 	rot.HardCutBackend = true
 	if err := h.rotationAt(rot, now); err != nil {
@@ -281,7 +316,7 @@ func TestRotationNeedsUpdate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newHarness(t, nil, gadget(withPolicy(hours(1), nil), trigger("x"), withPolicies(tt.policies...)))
+			h := newHarness(t, nil, boundSecret(), gadget(withPolicy(hours(1), nil), trigger("x"), withPolicies(tt.policies...)))
 			rot := existingRot()
 			if err := h.rotationAt(rot, now); err != nil {
 				t.Fatal(err)
@@ -301,7 +336,7 @@ func TestRotationNeedsUpdate(t *testing.T) {
 }
 
 func TestRotationInGraceStillFinishesWithoutUpdate(t *testing.T) {
-	h := newHarness(t, nil, gadget(withPolicies("Observe", "Create"),
+	h := newHarness(t, nil, boundSecret(), gadget(withPolicies("Observe", "Create"),
 		withRotation(common.RotationStatus{Active: "gen-1", Previous: "gen-0", RetireAfter: ts(now.Add(-time.Minute))})))
 	rot := existingRot()
 	if err := h.rotationAt(rot, now); err != nil {
@@ -326,7 +361,7 @@ func TestRotationUnsupportedByTheBackend(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newHarness(t, nil, gadget(tt.mut...))
+			h := newHarness(t, nil, boundSecret(), gadget(tt.mut...))
 			if err := h.rotationAt(existing(), now); err != nil {
 				t.Fatal(err)
 			}
@@ -344,7 +379,7 @@ func TestRotationUnsupportedByTheBackend(t *testing.T) {
 func TestRotationFailures(t *testing.T) {
 	boom := errors.New("backend refused")
 	t.Run("RotateBegin", func(t *testing.T) {
-		h := newHarness(t, nil, gadget(trigger("x")))
+		h := newHarness(t, nil, boundSecret(), gadget(trigger("x")))
 		rot := existingRot()
 		rot.BeginErr = boom
 		if err := h.rotationAt(rot, now); !errors.Is(err, boom) {
@@ -356,13 +391,12 @@ func TestRotationFailures(t *testing.T) {
 			t.Errorf("status.rotation = %+v after a failed begin", g.Status.Rotation)
 		}
 		h.rec.AssertEvent(t, corev1.EventTypeWarning, conditions.EventRotationFailed, "RotateBegin")
-		var s corev1.Secret
-		if err := h.c.Get(h.ctx, client.ObjectKey{Namespace: "ns", Name: "g"}, &s); err == nil {
-			t.Error("a binding Secret was written for a failed rotation")
+		if got := string(h.secret("g").Data["password"]); got != "OLD" {
+			t.Errorf("the binding Secret was rewritten for a failed rotation: %q", got)
 		}
 	})
 	t.Run("RotateBegin unreachable", func(t *testing.T) {
-		h := newHarness(t, nil, gadget(trigger("x")))
+		h := newHarness(t, nil, boundSecret(), gadget(trigger("x")))
 		rot := existingRot()
 		rot.BeginErr = fmt.Errorf("dial: %w", lifecycle.ErrUnreachable)
 		if err := h.rotationAt(rot, now); !errors.Is(err, lifecycle.ErrUnreachable) {
@@ -371,19 +405,23 @@ func TestRotationFailures(t *testing.T) {
 		wantCond(t, h.gadget("g").Status.Conditions, synced, metav1.ConditionFalse, conditions.ServerUnreachable)
 	})
 	t.Run("the binding Secret cannot be written", func(t *testing.T) {
-		foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "ns"}}
-		h := newHarness(t, nil, gadget(trigger("x")), foreign)
-		rot := existingRot()
-		res, err := h.reconcileGadget(rot, h.credOpts())
-		wantResult(t, res, err, poll) // a name collision does not back off
-		wantCond(t, h.gadget("g").Status.Conditions, synced, metav1.ConditionFalse, conditions.NameCollision)
+		secretBoom := errors.New("secret update boom")
+		h := newHarness(t, &interceptor.Funcs{Update: func(ctx context.Context, c client.WithWatch, o client.Object, opts ...client.UpdateOption) error {
+			if _, ok := o.(*corev1.Secret); ok {
+				return secretBoom
+			}
+			return c.Update(ctx, o, opts...)
+		}}, boundSecret(), gadget(trigger("x")))
+		if err := h.rotationAt(existingRot(), now); !errors.Is(err, secretBoom) {
+			t.Fatalf("err = %v", err)
+		}
 		h.rec.AssertEvent(t, corev1.EventTypeWarning, conditions.EventRotationFailed, "binding Secret")
 		if h.gadget("g").Status.Rotation != nil {
 			t.Error("a rotation was recorded though its credential was never delivered")
 		}
 	})
 	t.Run("RotateFinish", func(t *testing.T) {
-		h := newHarness(t, nil, gadget(withRotation(common.RotationStatus{Active: "gen-1", Previous: "gen-0", RetireAfter: ts(now.Add(-time.Minute))})))
+		h := newHarness(t, nil, boundSecret(), gadget(withRotation(common.RotationStatus{Active: "gen-1", Previous: "gen-0", RetireAfter: ts(now.Add(-time.Minute))})))
 		rot := existingRot()
 		rot.FinishErr = boom
 		if err := h.rotationAt(rot, now); !errors.Is(err, boom) {
@@ -406,7 +444,7 @@ func TestNoRotationAfterACreateOrUpdate(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, nil, gadget(trigger("x")))
+			h := newHarness(t, nil, boundSecret(), gadget(trigger("x")))
 			rot := ext()
 			if err := h.rotationAt(rot, now); err != nil {
 				t.Fatal(err)

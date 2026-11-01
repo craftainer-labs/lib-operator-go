@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"slices"
 	"sync"
 
@@ -37,8 +36,11 @@ type Entry struct {
 	// ServerRef is "<kind>/<name>" and ServerHost the endpoint's host.
 	ServerRef, ServerHost string
 	// ChangedFields are the JSON names of the spec fields that differ from the
-	// last reconcile; OldSpecSHA256 is empty on the first sight of an object.
+	// last reconcile. PreviousUnknown is true when the process had not seen the
+	// object before (after a restart): there is then no "before", and
+	// OldSpecSHA256 is empty.
 	ChangedFields                []string
+	PreviousUnknown              bool
 	OldSpecSHA256, NewSpecSHA256 string
 }
 
@@ -58,6 +60,7 @@ func Log(ctx context.Context, e Entry) {
 		"serverRef", e.ServerRef,
 		"serverHost", e.ServerHost,
 		"changedFields", e.ChangedFields,
+		"previousUnknown", e.PreviousUnknown,
 		"oldSpecSHA256", e.OldSpecSHA256,
 		"newSpecSHA256", e.NewSpecSHA256,
 	)
@@ -78,10 +81,13 @@ func LastManager(obj client.Object) string {
 
 // Tracker remembers, per object UID, what each top-level spec field looked
 // like at the last reconcile, in memory: only hashes, never values. After a
-// restart the first Observe of an object has no "before".
+// restart the first Observe of an object has no "before". It also remembers,
+// per object, the last value of a named notice, so a recurring warning is
+// raised only when its value changes.
 type Tracker struct {
-	mu   sync.Mutex
-	seen map[types.UID]snapshot
+	mu      sync.Mutex
+	seen    map[types.UID]snapshot
+	notices map[types.UID]map[string]string
 }
 
 type snapshot struct {
@@ -91,12 +97,14 @@ type snapshot struct {
 
 // NewTracker returns an empty Tracker.
 func NewTracker() *Tracker {
-	return &Tracker{seen: map[types.UID]snapshot{}}
+	return &Tracker{seen: map[types.UID]snapshot{}, notices: map[types.UID]map[string]string{}}
 }
 
 // Observe records the spec of the object and returns the sorted names of the
 // top-level fields that changed since the last call for the same UID, and the
-// SHA-256 sums of the previous spec (empty on the first call) and of this one.
+// SHA-256 sums of the previous spec and of this one. On the first call for a
+// UID there is no previous spec: changed is nil and oldSum is empty ("previous
+// unknown"), rather than every field being reported as changed.
 func (t *Tracker) Observe(uid types.UID, spec any) (changed []string, oldSum, newSum string, err error) {
 	raw, err := json.Marshal(spec)
 	if err != nil {
@@ -115,7 +123,7 @@ func (t *Tracker) Observe(uid types.UID, spec any) (changed []string, oldSum, ne
 	prev, had := t.seen[uid]
 	t.seen[uid] = cur
 	if !had {
-		return slices.Sorted(maps.Keys(cur.fields)), "", cur.sum, nil
+		return nil, "", cur.sum, nil
 	}
 	for k, v := range cur.fields {
 		if prev.fields[k] != v {
@@ -136,6 +144,27 @@ func (t *Tracker) Forget(uid types.UID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.seen, uid)
+	delete(t.notices, uid)
+}
+
+// Notice reports whether value differs from the last value noticed for key on
+// the object (true the first time), and remembers it.
+func (t *Tracker) Notice(uid types.UID, key, value string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	last, had := t.notices[uid][key]
+	if t.notices[uid] == nil {
+		t.notices[uid] = map[string]string{}
+	}
+	t.notices[uid][key] = value
+	return !had || last != value
+}
+
+// Clear forgets the notice for key, so the next Notice of any value is new.
+func (t *Tracker) Clear(uid types.UID, key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.notices[uid], key)
 }
 
 func sum(b []byte) string {

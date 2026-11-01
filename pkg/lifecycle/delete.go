@@ -19,6 +19,7 @@ import (
 func (r *run[S, O]) finalize() (ctrl.Result, error) {
 	cl := r.claim
 	if !controllerutil.ContainsFinalizer(cl, r.opts.FinalizerName) {
+		r.opts.Audit.Forget(cl.GetUID()) // it goes without release(): nothing of ours holds it
 		return ctrl.Result{}, nil
 	}
 	conditions.Ensure(cl.GetConditions(), cl.GetGeneration())
@@ -110,9 +111,9 @@ func (r *run[S, O]) release() (ctrl.Result, error) {
 	cl := r.claim
 	orig := cl.DeepCopyObject().(client.Object)
 	controllerutil.RemoveFinalizer(cl, r.opts.FinalizerName)
-	err := r.c.Patch(r.ctx, cl, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
+	err := r.gone(r.c.Patch(r.ctx, cl, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})))
 	if err == nil {
-		r.audit("Delete", "success")
+		r.audit("Delete", "success", true)
 		r.opts.Audit.Forget(cl.GetUID())
 	}
 	return ctrl.Result{}, client.IgnoreNotFound(err)

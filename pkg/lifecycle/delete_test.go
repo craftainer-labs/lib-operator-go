@@ -337,10 +337,14 @@ func TestDeletionOfAClaimWithoutOurFinalizerIsLeftAlone(t *testing.T) {
 	ts := metav1.NewTime(now)
 	w := widget(func(w *testWidget) { w.DeletionTimestamp = &ts; w.Finalizers = []string{"someone.else/finalizer"} })
 	ext := existing()
+	_, _, _, _ = h.audit.Observe("uid-w", spec{})
 	res, err := lifecycle.Reconcile(h.ctx, h.c, w, spec{}, lifecycle.External[spec, obj](ext), h.dataOpts())
 	wantResult(t, res, err, 0)
 	if len(ext.Calls()) != 0 || len(h.rec.Events()) != 0 {
 		t.Errorf("touched: %v %v", ext.Calls(), h.rec.Reasons())
+	}
+	if _, old, _, _ := h.audit.Observe("uid-w", spec{}); old != "" {
+		t.Error("the audit tracker still holds a claim that goes without release()")
 	}
 }
 
@@ -351,8 +355,12 @@ func TestFinalizerRemovalToleratesAClaimThatIsAlreadyGone(t *testing.T) {
 		w.DeletionTimestamp, w.Finalizers = &ts, []string{lifecycle.DefaultFinalizer}
 		w.Spec.ManagementPolicies = policies("Observe")
 	})
+	_, _, _, _ = h.audit.Observe("uid-w", spec{})
 	res, err := lifecycle.Reconcile(h.ctx, h.c, w, spec{}, lifecycle.External[spec, obj](existing()), h.dataOpts())
 	wantResult(t, res, err, 0)
+	if _, old, _, _ := h.audit.Observe("uid-w", spec{}); old != "" {
+		t.Error("the audit tracker still holds a claim that was already gone")
+	}
 }
 
 func TestFinalizerRemovalFailureIsReturned(t *testing.T) {

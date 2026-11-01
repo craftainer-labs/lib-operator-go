@@ -483,7 +483,10 @@ The framework drives a small state machine from `status.rotation`
 3. **Grace.** The claim stays `Ready=True`; `Synced` reason `Rotating`. The
    controller re-queues at `retireAfter`.
 4. **Finish.** At `retireAfter`, call `RotateFinish`, then clear `previous`
-   and `retireAfter`. A new rotation is not begun while `previous` is set.
+   and `retireAfter`. A new rotation is not begun while `previous` is set. A
+   `craftainer.dev/rotate` value that arrives during a grace period is consumed
+   and rejected (`lastTrigger` is updated, Warning Event `RotationDeferred`),
+   not queued: the user sets a new value after the grace period ends.
 
 `rotationPolicy` is `{interval: Duration (optional, min 1h, max 8760h), gracePeriod:
 Duration (default 1h, min 5m, max 168h)}`. Events: `RotationStarted`,

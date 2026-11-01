@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -79,49 +80,78 @@ func (r *run[S, O]) set(typ string, status metav1.ConditionStatus, reason, msg s
 // pollInterval returns the annotation's value, or the default (with a Warning
 // Event) when the annotation is not a duration between 30s and 24h.
 func (r *run[S, O]) pollInterval() time.Duration {
+	uid := r.claim.GetUID()
 	v, ok := r.claim.GetAnnotations()[AnnotationPollInterval]
 	if !ok {
+		r.opts.Audit.Clear(uid, noticePollInterval)
 		return r.opts.DefaultPollInterval
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d < MinPollInterval || d > MaxPollInterval {
-		r.event(corev1.EventTypeWarning, conditions.EventInvalidPollInterval, "Reconcile",
-			"annotation %s=%q is not a duration between %s and %s; using %s",
-			AnnotationPollInterval, v, MinPollInterval, MaxPollInterval, r.opts.DefaultPollInterval)
+		// Warn when the value changes, not on every reconcile.
+		if r.opts.Audit.Notice(uid, noticePollInterval, v) {
+			r.event(corev1.EventTypeWarning, conditions.EventInvalidPollInterval, "Reconcile",
+				"annotation %s=%q is not a duration between %s and %s; using %s",
+				AnnotationPollInterval, v, MinPollInterval, MaxPollInterval, r.opts.DefaultPollInterval)
+		}
 		return r.opts.DefaultPollInterval
 	}
+	r.opts.Audit.Clear(uid, noticePollInterval)
 	return d
 }
+
+// noticePollInterval is the audit.Tracker notice key of an invalid poll interval.
+const noticePollInterval = "pollInterval"
 
 func (r *run[S, O]) requeue() ctrl.Result {
 	extra := time.Duration(float64(r.poll) * jitterFraction * r.opts.Jitter())
 	return ctrl.Result{RequeueAfter: r.poll + extra}
 }
 
-// persist writes the status. The caller has set the conditions.
+// persist stamps a completed reconcile (observedGeneration, lastReconcileTime)
+// and writes the status. The caller has set the conditions.
 func (r *run[S, O]) persist() error {
 	r.claim.SetObservedGeneration(r.claim.GetGeneration())
 	r.claim.SetLastReconcileTime(metav1.NewTime(r.now))
-	return r.c.Status().Update(r.ctx, r.claim)
+	return r.save()
+}
+
+// save writes the status as it is. The deletion-policy pin uses it: a pin is
+// not a completed reconcile and must not claim one.
+func (r *run[S, O]) save() error {
+	return r.gone(r.c.Status().Update(r.ctx, r.claim))
+}
+
+// gone forgets what the audit tracker holds when err says the claim no longer
+// exists, and returns err.
+func (r *run[S, O]) gone(err error) error {
+	if apierrors.IsNotFound(err) {
+		r.opts.Audit.Forget(r.claim.GetUID())
+	}
+	return err
 }
 
 // done persists the status, writes the audit line for a state change or a
 // failure, and returns the result.
 func (r *run[S, O]) done(action, result string, res ctrl.Result, err error) (ctrl.Result, error) {
+	// Audit first: a status write that finds the claim gone then forgets it.
+	r.audit(action, result, action != "Observe" || result != "success")
 	if perr := r.persist(); perr != nil {
 		err = errors.Join(err, fmt.Errorf("update status: %w", perr))
-	}
-	if action != "Observe" || result != "success" {
-		r.audit(action, result)
 	}
 	return res, err
 }
 
-func (r *run[S, O]) audit(action, result string) {
+// audit fingerprints the spec on every reconcile, so the tracker always knows
+// the previous spec, and writes the audit line only when write is true.
+func (r *run[S, O]) audit(action, result string, write bool) {
 	cl := r.claim
 	changed, oldSum, newSum, err := r.opts.Audit.Observe(cl.GetUID(), r.spec)
 	if err != nil {
 		log.FromContext(r.ctx).Error(err, "audit: cannot fingerprint the spec")
+	}
+	if !write {
+		return
 	}
 	gvk, _ := apiutil.GVKForObject(cl, r.c.Scheme())
 	ref := cl.GetServerRef()
@@ -139,6 +169,7 @@ func (r *run[S, O]) audit(action, result string) {
 		ServerRef:     ref.Kind + "/" + ref.Name,
 		ServerHost:    r.opts.ServerHost,
 		ChangedFields: changed,
+		PreviousUnknown: oldSum == "",
 		OldSpecSHA256: oldSum,
 		NewSpecSHA256: newSum,
 	})
@@ -158,7 +189,7 @@ func (r *run[S, O]) pin() error {
 			cl.SetEffectiveDeletionPolicy(r.opts.DefaultDeletionPolicy, common.SourceOperatorDefault)
 		}
 		conditions.Ensure(cl.GetConditions(), cl.GetGeneration())
-		if err := r.persist(); err != nil {
+		if err := r.save(); err != nil {
 			return fmt.Errorf("pin the deletion policy: %w", err)
 		}
 		if hasFinalizer {
@@ -175,7 +206,7 @@ func (r *run[S, O]) pin() error {
 	}
 	orig := cl.DeepCopyObject().(client.Object)
 	controllerutil.AddFinalizer(cl, r.opts.FinalizerName)
-	if err := r.c.Patch(r.ctx, cl, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{})); err != nil {
+	if err := r.gone(r.c.Patch(r.ctx, cl, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))); err != nil {
 		return fmt.Errorf("add the finalizer: %w", err)
 	}
 	return nil
@@ -231,9 +262,17 @@ func (r *run[S, O]) sync() (ctrl.Result, error) {
 			return r.failed("WriteSecret", err)
 		}
 	}
-	if obs.Exists && r.pol.LateInitialize {
-		if li, ok := r.ext.(LateInitializer[S, O]); ok {
-			values, err := li.LateInitialize(r.ctx, r.spec, obs.Current)
+	if li, ok := r.ext.(LateInitializer[S, O]); ok && r.pol.LateInitialize {
+		cur, exists := obs.Current, obs.Exists
+		if did != "" { // the observation above predates the change: look again
+			again, err := r.ext.Observe(r.ctx, r.spec)
+			if err != nil {
+				return r.failed("Observe", err)
+			}
+			cur, exists = again.Current, again.Exists
+		}
+		if exists {
+			values, err := li.LateInitialize(r.ctx, r.spec, cur)
 			if err != nil {
 				return r.failed("LateInitialize", err)
 			}
@@ -243,8 +282,15 @@ func (r *run[S, O]) sync() (ctrl.Result, error) {
 
 	var rot rotationOutcome
 	if did == "" && r.opts.Class == ClassCredential {
-		if rot, err = r.rotate(obs.Current); err != nil {
-			return r.failed("Rotate", err)
+		if r.pol.Create || r.pol.Update { // an Observe-only claim has no credentials of its own
+			if rot, err = r.ensureBinding(obs.Current); err != nil {
+				return r.failed("Binding", err)
+			}
+		}
+		if !rot.rotated && !rot.bindingMissing {
+			if rot, err = r.rotate(obs.Current); err != nil {
+				return r.failed("Rotate", err)
+			}
 		}
 	}
 	return r.succeeded(did, wasSynced, rot)
@@ -261,6 +307,11 @@ func (r *run[S, O]) succeeded(did string, wasSynced bool, rot rotationOutcome) (
 		action = "Rotate"
 	}
 	switch {
+	case rot.bindingMissing:
+		healthy = false
+		r.set(conditions.Ready, metav1.ConditionFalse, conditions.BindingSecretMissing, rot.missingWhy)
+		r.set(conditions.Synced, metav1.ConditionFalse, conditions.BindingSecretMissing, rot.missingWhy)
+		r.event(corev1.EventTypeWarning, conditions.BindingSecretMissing, "Reconcile", "%s", rot.missingWhy)
 	case rot.unsupported:
 		healthy = false
 		r.set(conditions.Synced, metav1.ConditionFalse, conditions.RotationUnsupported,
@@ -362,11 +413,19 @@ func (r *run[S, O]) resolveResult(action, reason string, final bool) (ctrl.Resul
 
 func (r *run[S, O]) writeBinding(data binding.Data) error {
 	name := r.claim.GetBindingSecretName()
-	err := binding.WriteSecret(r.ctx, r.c, r.claim, name, r.opts.BindingType, r.opts.Provider, data,
-		binding.WithManagedBy(r.opts.ManagedBy))
+	err := binding.WriteSecret(r.ctx, r.c, r.claim, name, r.opts.BindingType, r.opts.Provider, data, r.writeOpts()...)
 	if err != nil {
 		return err
 	}
 	r.claim.SetBindingName(name)
 	return nil
+}
+
+// writeOpts are the binding options every Secret read and write shares.
+func (r *run[S, O]) writeOpts() []binding.WriteOption {
+	opts := []binding.WriteOption{binding.WithManagedBy(r.opts.ManagedBy)}
+	if r.opts.APIReader != nil {
+		opts = append(opts, binding.WithReader(r.opts.APIReader))
+	}
+	return opts
 }

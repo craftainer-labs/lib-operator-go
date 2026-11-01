@@ -8,11 +8,14 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/internal/testapi"
@@ -192,5 +195,142 @@ func TestCacheByObjectRestrictsSecrets(t *testing.T) {
 		if got := opts.Label.String(); got != "app.kubernetes.io/managed-by=operator-db" {
 			t.Errorf("selector = %q", got)
 		}
+	}
+}
+
+// hidingSecrets mimics the operator's label-filtered Secret cache: a Secret
+// without the managed-by label is not found through it.
+func hidingSecrets() interceptor.Funcs {
+	return interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, o client.Object, opts ...client.GetOption) error {
+		if _, ok := o.(*corev1.Secret); ok {
+			return apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, key.Name)
+		}
+		return c.Get(ctx, key, o, opts...)
+	}}
+}
+
+func TestWriteSecretCollisionBehindAFilteredCache(t *testing.T) {
+	ctx := context.Background()
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "mine", Namespace: "ns"}, Data: map[string][]byte{"k": []byte("v")}}
+	cached := fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(foreign).WithInterceptorFuncs(hidingSecrets()).Build()
+	o := owner("orders", "uid-1")
+
+	// Through the cache alone the Secret looks missing; the create then fails
+	// with AlreadyExists, which is a name collision too.
+	err := binding.WriteSecret(ctx, cached, o, "mine", binding.TypeS3, binding.DefaultProvider, binding.Data{"k": []byte("x")})
+	if !errors.Is(err, binding.ErrNameCollision) {
+		t.Errorf("err = %v, want ErrNameCollision", err)
+	}
+
+	// With the uncached reader the guard sees the Secret and its owner.
+	err = binding.WriteSecret(ctx, cached, o, "mine", binding.TypeS3, binding.DefaultProvider, nil,
+		binding.WithReader(fake.NewClientBuilder().WithScheme(scheme(t)).WithObjects(foreign.DeepCopy()).Build()))
+	if !errors.Is(err, binding.ErrNameCollision) {
+		t.Errorf("with a reader: err = %v, want ErrNameCollision", err)
+	}
+}
+
+func TestWriteSecretReaderFailure(t *testing.T) {
+	boom := errors.New("get boom")
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error { return boom },
+	}).Build()
+	if err := binding.WriteSecret(context.Background(), c, owner("o", "u"), "s", binding.TypeS3, "p", nil); !errors.Is(err, boom) {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func TestWriteSecretLeavesAMatchingSecretAlone(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).Build()
+	o := owner("orders", "uid-1")
+	data := binding.Data{"host": []byte("db")}
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypePostgreSQL, binding.DefaultProvider, data); err != nil {
+		t.Fatal(err)
+	}
+	rv := getSecret(t, c, "s").ResourceVersion
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypePostgreSQL, binding.DefaultProvider, data); err != nil {
+		t.Fatal(err)
+	}
+	if got := getSecret(t, c, "s").ResourceVersion; got != rv {
+		t.Errorf("resourceVersion %s -> %s: the second write must not update", rv, got)
+	}
+}
+
+func TestInspect(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).Build()
+	o := owner("orders", "uid-1")
+	inspect := func(name string, opts ...binding.WriteOption) binding.State {
+		t.Helper()
+		st, s, err := binding.Inspect(ctx, c, o, name, binding.TypePostgreSQL, binding.DefaultProvider, opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (st == binding.StateMissing) != (s == nil) {
+			t.Errorf("state %v with secret %v", st, s)
+		}
+		return st
+	}
+
+	if got := inspect("s"); got != binding.StateMissing {
+		t.Errorf("before the write: %v", got)
+	}
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypePostgreSQL, binding.DefaultProvider, binding.Data{"k": []byte("v")}); err != nil {
+		t.Fatal(err)
+	}
+	if got := inspect("s"); got != binding.StateCurrent {
+		t.Errorf("after the write: %v", got)
+	}
+	if got := inspect("s", binding.WithManagedBy("another-operator")); got != binding.StateDrifted {
+		t.Errorf("another operator's label: %v", got)
+	}
+
+	edits := map[string]func(*corev1.Secret){
+		"label removed":       func(s *corev1.Secret) { delete(s.Labels, binding.LabelClaim) },
+		"type key edited":     func(s *corev1.Secret) { s.Data[binding.KeyType] = []byte("mysql") },
+		"provider key edited": func(s *corev1.Secret) { s.Data[binding.KeyProvider] = []byte("evil.example") },
+		"provider key gone":   func(s *corev1.Secret) { delete(s.Data, binding.KeyProvider) },
+	}
+	for name, edit := range edits {
+		s := getSecret(t, c, "s")
+		edit(s)
+		if err := c.Update(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+		if got := inspect("s"); got != binding.StateDrifted {
+			t.Errorf("%s: %v", name, got)
+		}
+		if err := binding.WriteSecret(ctx, c, o, "s", binding.TypePostgreSQL, binding.DefaultProvider, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A Secret of another type is drift too (WriteSecret cannot fix a type).
+	odd := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "odd", Namespace: "ns",
+		OwnerReferences: getSecret(t, c, "s").OwnerReferences}, Type: corev1.SecretTypeOpaque}
+	if err := c.Create(ctx, odd); err != nil {
+		t.Fatal(err)
+	}
+	if got := inspect("odd"); got != binding.StateDrifted {
+		t.Errorf("wrong type: %v", got)
+	}
+
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "foreign", Namespace: "ns"}}
+	if err := c.Create(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+	if got := inspect("foreign"); got != binding.StateForeign {
+		t.Errorf("foreign: %v", got)
+	}
+}
+
+func TestInspectReaderFailure(t *testing.T) {
+	boom := errors.New("get boom")
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error { return boom },
+	}).Build()
+	if _, _, err := binding.Inspect(context.Background(), c, owner("o", "u"), "s", binding.TypeS3, "p"); !errors.Is(err, boom) {
+		t.Errorf("err = %v", err)
 	}
 }

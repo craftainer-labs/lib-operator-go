@@ -19,6 +19,10 @@ type rotationOutcome struct {
 	blocked bool
 	// rotated and finished: RotateBegin or RotateFinish completed in this call.
 	rotated, finished bool
+	// bindingMissing: the binding Secret is gone and cannot be recreated;
+	// missingWhy says why, for the condition and the Event.
+	bindingMissing bool
+	missingWhy     string
 	// grace: the previous generation is still valid; retireIn is how long.
 	grace    bool
 	retireIn time.Duration
@@ -43,6 +47,15 @@ func (r *run[S, O]) rotate(cur O) (rotationOutcome, error) {
 		return rotationOutcome{unsupported: policy != nil || triggered}, nil
 	}
 	if rs.Previous != "" || rs.RetireAfter != nil {
+		if triggered {
+			// A trigger during the grace period is consumed and rejected, not
+			// queued: the user sets a new value after the grace period ends.
+			rs.LastTrigger = trigger
+			cl.SetRotationStatus(rs)
+			r.event(corev1.EventTypeWarning, conditions.EventRotationDeferred, "Rotate",
+				"%s=%q arrived while the previous credential generation is still valid; it is ignored, set a new value after the grace period ends",
+				AnnotationRotate, trigger)
+		}
 		return r.finishIfDue(rot, cur, rs)
 	}
 	if !r.due(policy, rs, triggered) {

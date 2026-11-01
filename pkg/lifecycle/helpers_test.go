@@ -19,6 +19,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/audit"
+	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 	"github.com/craftainer-labs/lib-operator-go/pkg/internal/testapi"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
@@ -60,6 +62,9 @@ type harness struct {
 
 	mu   sync.Mutex
 	logs []string
+
+	// audit is the tracker every reconcile of this harness shares.
+	audit *audit.Tracker
 }
 
 func newHarness(t *testing.T, funcs *interceptor.Funcs, objs ...client.Object) *harness {
@@ -69,7 +74,7 @@ func newHarness(t *testing.T, funcs *interceptor.Funcs, objs ...client.Object) *
 	if funcs != nil {
 		b = b.WithInterceptorFuncs(*funcs)
 	}
-	h := &harness{t: t, c: b.Build(), rec: &testenv.Recorder{}}
+	h := &harness{t: t, c: b.Build(), rec: &testenv.Recorder{}, audit: audit.NewTracker()}
 	logger := funcr.NewJSON(func(line string) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -89,7 +94,7 @@ func (h *harness) dataOpts() lifecycle.Options {
 	return lifecycle.Options{
 		Class: lifecycle.ClassData, Recorder: h.rec, ManagedBy: "operator-test",
 		Now: func() time.Time { return now }, Jitter: func() float64 { return 0 },
-		Audit: nil,
+		Audit: h.audit,
 	}
 }
 
@@ -240,3 +245,17 @@ const (
 	synced = conditions.Synced
 	reach  = conditions.ServerReachable
 )
+
+// boundSecret is the binding Secret of the gadget "g" as the framework leaves
+// it: controlled by the claim, with the labels, type and keys it writes.
+func boundSecret() *corev1.Secret {
+	yes := true
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "g", Namespace: "ns",
+			Labels: map[string]string{binding.LabelManagedBy: "operator-test", binding.LabelClaim: "g"},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: testapi.GroupVersion.String(), Kind: "Gadget",
+				Name: "g", UID: "uid-g", Controller: &yes}}},
+		Type: binding.SecretType("postgresql"),
+		Data: map[string][]byte{"type": []byte("postgresql"), "provider": []byte("craftainer.dev"), "password": []byte("OLD")},
+	}
+}

@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -90,10 +92,13 @@ func (d Data) GoString() string { return d.String() }
 // not its controller, so WriteSecret refuses to take it over.
 var ErrNameCollision = errors.New("a Secret of that name exists and is not owned by this claim")
 
-// WriteOption configures WriteSecret.
+// WriteOption configures WriteSecret and Inspect.
 type WriteOption func(*writeConfig)
 
-type writeConfig struct{ managedBy string }
+type writeConfig struct {
+	managedBy string
+	reader    client.Reader
+}
 
 // WithManagedBy sets the app.kubernetes.io/managed-by label, the operator's
 // name; the default is DefaultManagedBy.
@@ -101,44 +106,127 @@ func WithManagedBy(operator string) WriteOption {
 	return func(c *writeConfig) { c.managedBy = operator }
 }
 
-// WriteSecret creates or updates the Secret name in owner's namespace with a
-// controller owner reference to owner, type servicebinding.io/<typ>, the
-// managed-by and craftainer.dev/claim labels, and data plus the type and
-// provider keys. It returns ErrNameCollision when the Secret exists and owner
-// is not its controller. A Secret's type is immutable, so a different type on
-// an existing Secret is an error.
-func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
-	name, typ, provider string, data Data, opts ...WriteOption) error {
+// WithReader sets the reader that looks for a Secret that already exists.
+// Pass the manager's uncached API reader: the operator's Secret cache is
+// restricted to its managed-by label (CacheByObject), so through the cache a
+// user's unlabelled Secret of the same name is invisible and would be
+// reported as missing. The default is the client itself.
+func WithReader(r client.Reader) WriteOption {
+	return func(c *writeConfig) { c.reader = r }
+}
+
+func newWriteConfig(opts []WriteOption) writeConfig {
 	cfg := writeConfig{managedBy: DefaultManagedBy}
 	for _, o := range opts {
 		o(&cfg)
 	}
-	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace()}}
+	return cfg
+}
+
+// WriteSecret creates or updates the Secret name in owner's namespace with a
+// controller owner reference to owner, type servicebinding.io/<typ>, the
+// managed-by and craftainer.dev/claim labels, and data plus the type and
+// provider keys. It returns ErrNameCollision when the Secret exists and owner
+// is not its controller, whether the existing Secret is seen by the reader or
+// only discovered when the create fails with AlreadyExists. A Secret's type is
+// immutable, so a different type on an existing Secret is an error. A Secret
+// that already matches is not written.
+func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
+	name, typ, provider string, data Data, opts ...WriteOption) error {
+	cfg := newWriteConfig(opts)
+	reader := cfg.reader
+	if reader == nil {
+		reader = c
+	}
 	want := SecretType(typ)
-	_, err := controllerutil.CreateOrUpdate(ctx, c, secret, func() error {
-		if secret.ResourceVersion != "" {
-			if !metav1.IsControlledBy(secret, owner) {
-				return fmt.Errorf("%w: %s/%s", ErrNameCollision, secret.Namespace, secret.Name)
-			}
-			if secret.Type != want {
-				return fmt.Errorf("secret %s/%s has type %q, want %q (a Secret's type is immutable)",
-					secret.Namespace, secret.Name, secret.Type, want)
-			}
+	secret := &corev1.Secret{}
+	err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, secret)
+	exists := err == nil
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if exists {
+		if !metav1.IsControlledBy(secret, owner) {
+			return fmt.Errorf("%w: %s/%s", ErrNameCollision, secret.Namespace, secret.Name)
 		}
-		secret.Type = want
-		secret.Labels = mergeLabels(secret.Labels, map[string]string{
-			LabelManagedBy: cfg.managedBy,
-			LabelClaim:     owner.GetName(),
-		})
-		secret.Data = make(map[string][]byte, len(data)+2)
-		for k, v := range data {
-			secret.Data[k] = append([]byte(nil), v...)
+		if secret.Type != want {
+			return fmt.Errorf("secret %s/%s has type %q, want %q (a Secret's type is immutable)",
+				secret.Namespace, secret.Name, secret.Type, want)
 		}
-		secret.Data[KeyType] = []byte(typ)
-		secret.Data[KeyProvider] = []byte(provider)
-		return controllerutil.SetControllerReference(owner, secret, c.Scheme())
+	} else {
+		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace()}}
+	}
+	before := secret.DeepCopy()
+	secret.Type = want
+	secret.Labels = mergeLabels(secret.Labels, map[string]string{
+		LabelManagedBy: cfg.managedBy,
+		LabelClaim:     owner.GetName(),
 	})
-	return err
+	secret.Data = make(map[string][]byte, len(data)+2)
+	for k, v := range data {
+		secret.Data[k] = append([]byte(nil), v...)
+	}
+	secret.Data[KeyType] = []byte(typ)
+	secret.Data[KeyProvider] = []byte(provider)
+	if err := controllerutil.SetControllerReference(owner, secret, c.Scheme()); err != nil {
+		return err
+	}
+	switch {
+	case !exists:
+		err := c.Create(ctx, secret)
+		if apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("%w: %s/%s", ErrNameCollision, secret.Namespace, secret.Name)
+		}
+		return err
+	case equality.Semantic.DeepEqual(before, secret):
+		return nil
+	default:
+		return c.Update(ctx, secret)
+	}
+}
+
+// State is what Inspect found.
+type State int
+
+const (
+	// StateMissing: there is no Secret of that name.
+	StateMissing State = iota
+	// StateCurrent: the claim controls the Secret and its type, labels and
+	// type and provider keys are as WriteSecret leaves them.
+	StateCurrent
+	// StateDrifted: the claim controls the Secret but its type, labels or type
+	// and provider keys were edited.
+	StateDrifted
+	// StateForeign: the Secret exists and the claim is not its controller.
+	StateForeign
+)
+
+// Inspect reads the binding Secret through the reader (the uncached API reader
+// of the manager, so a Secret outside the cache's label filter is seen) and
+// classifies it. It also returns the Secret when there is one. The credential
+// keys are not compared: only the backend knows them.
+func Inspect(ctx context.Context, reader client.Reader, owner client.Object,
+	name, typ, provider string, opts ...WriteOption) (State, *corev1.Secret, error) {
+	cfg := newWriteConfig(opts)
+	var secret corev1.Secret
+	if err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return StateMissing, nil, nil
+		}
+		return 0, nil, err
+	}
+	switch {
+	case !metav1.IsControlledBy(&secret, owner):
+		return StateForeign, &secret, nil
+	case secret.Type != SecretType(typ),
+		secret.Labels[LabelManagedBy] != cfg.managedBy,
+		secret.Labels[LabelClaim] != owner.GetName(),
+		string(secret.Data[KeyType]) != typ,
+		string(secret.Data[KeyProvider]) != provider:
+		return StateDrifted, &secret, nil
+	default:
+		return StateCurrent, &secret, nil
+	}
 }
 
 func mergeLabels(have, want map[string]string) map[string]string {

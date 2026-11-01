@@ -1,6 +1,8 @@
 package conditions
 
 import (
+	"unicode/utf8"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -36,6 +38,9 @@ const (
 	ManagementPolicyBlocked       = "ManagementPolicyBlocked"
 	RotationUnsupported           = "RotationUnsupported"
 	Rotating                      = "Rotating"
+	// BindingSecretMissing is the reason of a credential claim whose binding
+	// Secret is gone and cannot be recreated without the backend.
+	BindingSecretMissing = "BindingSecretMissing"
 	// Reconciling is the reason of a condition that was set to Unknown on the
 	// first reconcile and not evaluated yet.
 	Reconciling = "Reconciling"
@@ -56,6 +61,8 @@ const (
 	EventRotationFinished       = "RotationFinished"
 	EventRotatedWithoutOverlap  = "RotatedWithoutOverlap"
 	EventRotationFailed         = "RotationFailed"
+	EventRotationDeferred       = "RotationDeferred"
+	EventBindingRepaired        = "BindingRepaired"
 	EventInvalidPollInterval    = "InvalidPollInterval"
 )
 
@@ -68,7 +75,11 @@ const MaxMessageLength = 1024
 // changed. A message longer than MaxMessageLength is cut.
 func Set(conds *[]metav1.Condition, generation int64, typ string, status metav1.ConditionStatus, reason, message string) bool {
 	if len(message) > MaxMessageLength {
-		message = message[:MaxMessageLength]
+		cut := MaxMessageLength
+		for !utf8.RuneStart(message[cut]) { // never end in the middle of a character
+			cut--
+		}
+		message = message[:cut]
 	}
 	return meta.SetStatusCondition(conds, metav1.Condition{
 		Type:               typ,

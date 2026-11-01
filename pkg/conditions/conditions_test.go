@@ -3,6 +3,7 @@ package conditions_test
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +30,17 @@ func TestSetCutsLongMessages(t *testing.T) {
 	conditions.Set(&conds, 1, conditions.Synced, metav1.ConditionFalse, conditions.ReconcileError, strings.Repeat("x", 5000))
 	if got := len(conds[0].Message); got != conditions.MaxMessageLength {
 		t.Errorf("message length = %d, want %d", got, conditions.MaxMessageLength)
+	}
+}
+
+func TestSetCutsOnACharacterBoundary(t *testing.T) {
+	var conds []metav1.Condition
+	// 1023 bytes, then two-byte characters: byte 1024 is the middle of one.
+	conditions.Set(&conds, 1, conditions.Synced, metav1.ConditionFalse, conditions.ReconcileError,
+		strings.Repeat("a", conditions.MaxMessageLength-1)+strings.Repeat("é", 10))
+	got := conds[0].Message
+	if !utf8.ValidString(got) || len(got) != conditions.MaxMessageLength-1 {
+		t.Errorf("message = %d bytes, valid UTF-8 %v", len(got), utf8.ValidString(got))
 	}
 }
 

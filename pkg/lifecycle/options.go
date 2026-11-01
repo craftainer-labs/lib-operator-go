@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -69,6 +70,11 @@ type Options struct {
 	// ResolveErr is the error server.Resolve returned for this claim, or nil. When
 	// it is set the External may be nil.
 	ResolveErr error
+	// APIReader is the manager's uncached reader (mgr.GetAPIReader()). The
+	// binding Secret is looked for through it, because the operator's Secret
+	// cache is restricted to its managed-by label and cannot see a user's
+	// Secret of the same name. nil uses the client.
+	APIReader client.Reader
 	// ServerHost is the host of the server's endpoint, for the audit log.
 	ServerHost string
 	// OnOrphan, if set, runs when the external object is left in place because

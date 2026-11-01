@@ -2,3 +2,4 @@
 # ignore tier only, read by the completeness check and never by sync.
 ignore:
   - docs/crd-drafts.md
+  - pkg/internal/testapi/crds/
