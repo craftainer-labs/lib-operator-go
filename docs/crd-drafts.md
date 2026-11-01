@@ -110,13 +110,13 @@ Data kinds add:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `effectiveDeletionPolicy` | enum | `Delete` or `Retain`. With source `OperatorDefault` it is the default pinned at the claim's first reconcile, and deletion honours it, not the current env var. With source `Spec` it mirrors `spec.deletionPolicy`, which deletion reads directly |
-| `deletionPolicySource` | enum | `Spec` or `OperatorDefault` |
+| `effectiveDeletionPolicy` | enum | `Delete` or `Retain`: the default pinned at the claim's first reconcile. Deletion honours it, not the current env var, unless `spec.deletionPolicy` is set, which deletion reads directly and which never changes this field |
+| `deletionPolicySource` | enum | `OperatorDefault` (pinned from the env var) or `Fallback` (status was lost; pinned to `Retain`) |
 
 The first reconcile pins the default and emits the Normal Event
 `DeletionPolicyResolved`; later reconciles do not rewrite an `OperatorDefault`
-value. Lost status is re-pinned from the current env var with the Warning
-Event `DeletionPolicyRepinned` (ADR 0002 section 4).
+value. Lost status (finalizer present, field empty) is pinned to `Retain` with
+the Warning Event `DeletionPolicyRepinned` (ADR 0002 section 4).
 
 Credential-bearing kinds add:
 

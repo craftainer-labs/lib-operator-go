@@ -216,7 +216,7 @@ Every claim has this common status (`ClaimStatus`):
 - `lastReconcileTime`.
 - `lateInitialized`: see `LateInitialize` in section 5.
 - Data kinds only: `effectiveDeletionPolicy` (`Delete` or `Retain`) and
-  `deletionPolicySource` (`Spec` or `OperatorDefault`), see section 4.
+  `deletionPolicySource` (`OperatorDefault` or `Fallback`), see section 4.
 
 Conditions follow the [Kubernetes API conventions] (`Ready` summarises;
 no condition is removed once set; the controller sets `Unknown` instead of
@@ -245,30 +245,31 @@ dropping a condition it cannot evaluate).
   default for that object. The operators in `mqtt`, `cache` and `oidc` have no
   data kind; they still accept the variable (so one Helm value serves all
   five) but do not use it.
-- **The default is pinned at creation.** On its first reconcile a data
-  claim without `spec.deletionPolicy` gets the resolved default written to
+- **The default is pinned at creation.** The first reconcile of a data
+  claim adds the finalizer and, in the same status write and before any
+  external action, records the resolved default in
   `status.effectiveDeletionPolicy` with `status.deletionPolicySource:
-  OperatorDefault`, and the controller emits a Normal Event
-  `DeletionPolicyResolved`. Deletion honours that recorded value, never the
-  current environment variable, so changing `DEFAULT_DATA_DELETION_POLICY`
-  (and restarting the operator) affects only claims created afterwards.
-  Reconciles do not rewrite a recorded `OperatorDefault` value.
-- **An explicit `spec.deletionPolicy` wins and is read at deletion.** While
-  the field is set, `status.effectiveDeletionPolicy` mirrors it with source
-  `Spec` (updated on reconcile, with a `DeletionPolicyResolved` Event on a
-  change), but deletion uses the spec value itself, so an edit made just
-  before deleting counts even if status has not caught up. If the field is
-  later removed, the claim is pinned again from the current environment
-  variable at its next reconcile (source `OperatorDefault`, with a
-  `DeletionPolicyResolved` Event), because the original pin was overwritten
-  while the spec value was set. Judgement call, as above.
+  OperatorDefault`, and emits a Normal Event `DeletionPolicyResolved`. A claim
+  deleted before its first reconcile has created nothing externally, so there
+  is nothing for a policy to act on. Deletion honours the recorded value,
+  never the current environment variable, so changing
+  `DEFAULT_DATA_DELETION_POLICY` (and restarting the operator) affects only
+  claims created afterwards. Reconciles never rewrite the recorded value.
+- **An explicit `spec.deletionPolicy` wins and is read at deletion.** It does
+  not touch the pin: status keeps the pinned default, so removing the spec
+  field later returns the claim to the value pinned at creation. Deletion
+  reads the spec value itself, so an edit made just before deleting counts.
 - **If status was lost** (an object restored from a backup or applied again
-  without status, with no `spec.deletionPolicy`): the controller re-resolves
-  the default from the current environment variable, records it with source
-  `OperatorDefault`, and emits a Warning Event `DeletionPolicyRepinned`
-  saying the original pin is unknown. This is the author's judgement call,
-  not a user decision. A deletion that arrives before any reconcile has
-  re-pinned a status-less claim does the same resolution first.
+  without status; told apart from a first reconcile because the finalizer is
+  already present while `status.effectiveDeletionPolicy` is empty), and
+  `spec.deletionPolicy` is unset: the original pin is unknown, so the
+  controller pins `Retain`, the non-destructive value, whatever the current
+  environment variable says. It records source `Fallback` and emits a Warning
+  Event `DeletionPolicyRepinned` saying so. A deletion that arrives before
+  that reconcile applies the same `Retain`. This is the author's judgement
+  call, not a user decision: the user's lean was to re-resolve from the
+  environment variable, which could turn a `Retain` claim into a `Delete`
+  one after a restore with a changed default.
 - The operator logs the configured default once at startup.
 - **Deletion outcome** (`P` is whether `managementPolicies` permits `Delete`):
 
@@ -277,6 +278,7 @@ dropping a condition it cannot evaluate).
   | credential | yes | n/a | deleted | `Deleted` |
   | data | yes | `Delete` | deleted | `Deleted` |
   | data | yes | `Retain` | left in place | `Retained` |
+  | data, status lost | yes | `Retain` (fallback) | left in place | Warning `DeletionPolicyRepinned`, then `Retained` |
   | any | no, and the list has `Create` or `Update` | any | left in place (orphaned) | Warning `ExternalObjectOrphaned` |
   | any | no, and the list is `["Observe"]` | any | left in place (never ours) | Normal `Retained` |
 
@@ -546,7 +548,15 @@ Rules:
    hold one uses `HashLong`, because the name is then the only barrier. The
    markerless objects are: Valkey ACL users, RustFS users and service
    accounts (the S3 credential kinds), and DCR client names. Every other
-   row of the table below has a marker and uses `HashShort`.
+   row of the table below has a marker and uses `HashShort`. A DCR client is
+   found by the `client_id` the IdP assigned (`status.externalId`), never by
+   name, so a name clash cannot make the operator adopt another tenant's
+   client; the long hash only keeps display names apart. The table's `hl`
+   column is asserted by a table-driven test in `naming`, so a caller cannot
+   pass the wrong length for a backend unnoticed.
+6. `cut` keeps at least 5 characters of `readable` (`maxLen - len(sep) -
+   hl >= 5`). `ns` starts with an alphanumeric character, so the visible
+   prefix is never empty after stripping.
 
 Example: `Tenant("team-a", "orders", 63, "_", HashShort)` is
 `team-a_orders_gdeqxvirep`, `Tenant("team-a", "orders", 63, "-", HashShort)`
@@ -593,7 +603,9 @@ Callers subtract any suffix they append from `maxLen` (the rotation suffixes
 The two limits marked "not verified" are added to that operator's NOxb open
 checks. If a backend turns out shorter, only the `maxLen` constant changes:
 the rules do not. The long hash needs `maxLen` of at least 22; every
-`HashLong` row passes 63 or more, so that holds unless the RustFS user-name
+`HashLong` row passes 63 or more (the rotation generations of RustFS
+service accounts are separate access keys, not name suffixes, so no budget
+is subtracted), so that holds unless the RustFS user-name
 limit turns out below 22, in which case the item escalates instead of
 shortening the hash.
 
@@ -715,9 +727,11 @@ are written to these outcomes.
    pinned at creation. The first reconcile records it in
    `status.effectiveDeletionPolicy`, and deletion honours the recorded value,
    not the current variable; an explicit `spec.deletionPolicy` wins and is
-   read at deletion. For a claim whose status was lost, the controller
-   re-resolves and emits a Warning Event; that is the author's judgement call,
-   not the user's, and so is re-pinning when `spec.deletionPolicy` is removed.
+   read at deletion. For a claim whose status was lost the controller emits a
+   Warning Event; that is the author's judgement call,
+   not the user's: a claim whose status was lost is pinned to `Retain`
+   (source `Fallback`), not re-resolved from the variable, so a restore cannot
+   turn `Retain` into `Delete`.
 6. Naming: the hash is always appended; the readable-when-safe branch and its
    exclusion rule are gone; the ownership marker and per-backend length limits
    stay (section 10). Follow-up decision (GA1b, 2026-11-01): backends with no
