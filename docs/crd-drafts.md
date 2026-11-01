@@ -1,10 +1,11 @@
 # CRD drafts for the five craftainer.dev groups
 
-Draft API for G-api, written to the conventions of
-[ADR 0002](adrs/0002-operator-crd-conventions.md) (Proposed). All kinds are
-`v1alpha1`. Nothing here is implemented; the field tables are what the API
-types and CRD schemas will be generated from. Names, defaults and validations
-can change at G-api.
+API for the five groups, written to the conventions of
+[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted, 2026-11-01, with
+the G-api decisions folded in). All kinds are `v1alpha1`. Nothing here is
+implemented; the field tables are what the API types and CRD schemas will be
+generated from. The shared blocks are Go types in `lib-operator-go`'s
+`pkg/apis/common`, which the operators embed.
 
 Conventions used in the tables:
 
@@ -37,7 +38,14 @@ Cluster servers add:
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
-| `allowedNamespaces` | `metav1.LabelSelector` | no | absent: no namespace is allowed | an empty selector `{}` allows all; `matchLabels` and `matchExpressions` maxItems 20 |
+| `allowedNamespaces.from` | enum | yes | none | `All`, `Selector` (the Gateway API `FromNamespaces` values without `Same`) |
+| `allowedNamespaces.selector` | `metav1.LabelSelector` | iff `from: Selector` | none | `matchLabels` maxProperties 20, `matchExpressions` maxItems 20; CEL: absent when `from: All`; when `from: Selector`, present and `size(matchLabels) + size(matchExpressions) > 0` (absent counts as 0), so an empty selector cannot match everything |
+
+`allowedNamespaces` is itself required (CRD `required`), so a cluster server
+without it is rejected at admission: it fails closed. Namespaced servers have
+no `allowedNamespaces` and serve only claims in their own namespace. The shape
+is that of the Gateway API's `allowedRoutes.namespaces`
+([RouteNamespaces](https://gateway-api.sigs.k8s.io/reference/api-spec/1.6/spec/)).
 
 There is no `insecureSkipVerify` field.
 
@@ -56,8 +64,19 @@ Status (`ServerStatus`):
 | --- | --- | --- | --- | --- |
 | `serverRef.kind` | enum | yes | | the group's two server kinds; immutable |
 | `serverRef.name` | string | yes | | DNS-1123 subdomain, maxLength 253; immutable |
-| `deletionPolicy` | enum | no | per kind (below) | `Delete`, `Retain` |
-| `managementPolicies` | list of enum | no | `["*"]` | items `*`, `Observe`; maxItems 2; CEL: `self.size() == 1` (`*` and `Observe` do not combine) |
+| `managementPolicies` | list of enum | no | `["*"]` | items `*`, `Observe`, `Create`, `Update`, `Delete`, `LateInitialize`; minItems 1, maxItems 5; unique; CEL: `*` only alone (`self.size() == 1` if it is present), and any list other than `["*"]` contains `Observe`. Semantics in ADR 0002 section 5 |
+
+### `DataClaim` (data kinds: `Database`, `Bucket`)
+
+Adds to `ClaimCommon`:
+
+| Field | Type | Req | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `deletionPolicy` | enum | no | none in the schema: the operator's `DEFAULT_DATA_DELETION_POLICY` (`Retain` when unset) | `Delete`, `Retain` |
+
+Credential-bearing kinds have no `deletionPolicy`: they are always deleted
+with their claim (when `managementPolicies` permits `Delete`; ADR 0002
+section 4). The mqtt, cache and oidc groups have no data kind.
 
 ### `Credentials` (credential-bearing claim kinds)
 
@@ -67,9 +86,14 @@ Status (`ServerStatus`):
 | `rotationPolicy.interval` | duration | no | none (rotate on trigger only) | min `1h`, max `8760h` |
 | `rotationPolicy.gracePeriod` | duration | no | `1h` | min `5m`, max `168h` |
 
+CEL on the claim spec of each credential kind (it has to see both fields, so
+it cannot sit on `rotationPolicy` itself): `!has(self.rotationPolicy) ||
+self.managementPolicies == ['*'] || 'Update' in self.managementPolicies`.
+
 The annotation `craftainer.dev/rotate: "<any new value>"` triggers one
-rotation; `craftainer.dev/poll-interval: "<duration>"` (30s to 24h) overrides
-the drift poll; `craftainer.dev/paused: "true"` (proposed) stops reconciling.
+rotation (it also needs `Update`); `craftainer.dev/poll-interval:
+"<duration>"` (30s to 24h) overrides the drift poll;
+`craftainer.dev/paused: "true"` stops reconciling.
 
 ### `ClaimStatus` (every claim kind)
 
@@ -80,6 +104,17 @@ the drift poll; `craftainer.dev/paused: "true"` (proposed) stops reconciling.
 | `externalName` | string | derived name from `naming.Tenant`; maxLength 255 |
 | `externalId` | string | backend-assigned id, where there is one; maxLength 255 |
 | `lastReconcileTime` | time | |
+| `lateInitialized` | map of string | values recorded under `LateInitialize`; maxProperties 20, values maxLength 255 |
+
+Data kinds add:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `effectiveDeletionPolicy` | enum | `Delete` or `Retain`: the policy deletion will use now |
+| `deletionPolicySource` | enum | `Spec` or `OperatorDefault` |
+
+The controller sets both on every reconcile and emits the Normal Event
+`DeletionPolicyResolved` when either changes.
 
 Credential-bearing kinds add:
 
@@ -100,9 +135,16 @@ Credential-bearing kinds add:
 
 ---
 
+## Operator configuration
+
+Every operator reads the environment variable `DEFAULT_DATA_DELETION_POLICY`
+(`Retain` or `Delete`; unset or empty means `Retain`; anything else fails
+startup). It is the `deletionPolicy` of a data kind whose spec leaves the
+field unset. Only `operator-db` and `operator-s3` have data kinds.
+
 ## Group `db.craftainer.dev` (operator-db, PostgreSQL)
 
-Binding type `postgresql`. Group default `deletionPolicy`: `Retain`.
+Binding type `postgresql`.
 
 ### `ClusterDatabaseServer` (cluster scoped) and `DatabaseServer` (namespaced)
 
@@ -131,7 +173,9 @@ spec:
       secretRef: {name: pg-ca, key: ca.crt}
   adminCredentialsSecretRef: {name: pg-admin, namespace: craftainer-system}
   allowedNamespaces:
-    matchLabels: {craftainer.dev/db: allowed}
+    from: Selector
+    selector:
+      matchLabels: {craftainer.dev/db: allowed}
   allowedExtensions: [pgcrypto, uuid-ossp]
 ---
 apiVersion: db.craftainer.dev/v1alpha1
@@ -144,8 +188,9 @@ spec:
 
 ### `Database` (namespaced claim, data kind)
 
-Includes `ClaimCommon` (default `deletionPolicy: Retain`). No binding Secret:
-access comes from a `DatabaseRole`.
+Includes `ClaimCommon` and `DataClaim` (`deletionPolicy` defaults to the
+operator's `DEFAULT_DATA_DELETION_POLICY`, `Retain` when unset). No binding
+Secret: access comes from a `DatabaseRole`.
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
@@ -168,8 +213,8 @@ spec:
 
 ### `DatabaseRole` (namespaced claim, credential kind)
 
-Includes `ClaimCommon`, `Credentials`. Default `deletionPolicy`: `Retain` (see
-ADR decision 5: lean is `Delete` for credential kinds).
+Includes `ClaimCommon`, `Credentials`. No `deletionPolicy`: the role is always
+deleted with the claim (ADR 0002 section 4).
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
@@ -197,8 +242,7 @@ spec:
 
 ## Group `s3.craftainer.dev` (operator-s3, RustFS)
 
-Binding type `s3`. Group default `deletionPolicy`: `Retain`. COSI-aligned
-names, no COSI dependency.
+Binding type `s3`. COSI-aligned names, no COSI dependency.
 
 ### `ClusterObjectStore` (cluster scoped) and `ObjectStore` (namespaced)
 
@@ -222,8 +266,10 @@ spec:
   endpoint: https://rustfs.storage.svc.cluster.local:9000
   adminCredentialsSecretRef: {name: rustfs-admin, namespace: craftainer-system}
   allowedNamespaces:
-    matchExpressions:
-      - {key: kubernetes.io/metadata.name, operator: In, values: [team-a, team-b]}
+    from: Selector
+    selector:
+      matchExpressions:
+        - {key: kubernetes.io/metadata.name, operator: In, values: [team-a, team-b]}
 ---
 apiVersion: s3.craftainer.dev/v1alpha1
 kind: ObjectStore
@@ -235,7 +281,9 @@ spec:
 
 ### `Bucket` (namespaced claim, data kind)
 
-Includes `ClaimCommon` (default `deletionPolicy: Retain`). No binding Secret.
+Includes `ClaimCommon` and `DataClaim` (`deletionPolicy` defaults to the
+operator's `DEFAULT_DATA_DELETION_POLICY`, `Retain` when unset). No binding
+Secret.
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
@@ -259,8 +307,8 @@ spec:
 
 ### `BucketAccess` (namespaced claim, credential kind)
 
-Includes `ClaimCommon`, `Credentials`. Default `deletionPolicy`: `Retain`
-(ADR decision 5).
+Includes `ClaimCommon`, `Credentials`. No `deletionPolicy`: the access key and
+its service accounts are always deleted with the claim (ADR 0002 section 4).
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
@@ -288,7 +336,7 @@ spec:
 
 ## Group `mqtt.craftainer.dev` (operator-mqtt, Mosquitto Dynamic Security)
 
-Binding type `mqtt`. Group default `deletionPolicy`: `Delete`.
+Binding type `mqtt`.
 
 ### `ClusterMqttBroker` (cluster scoped) and `MqttBroker` (namespaced)
 
@@ -312,7 +360,7 @@ metadata: {name: mosquitto}
 spec:
   host: mosquitto.messaging.svc.cluster.local
   adminCredentialsSecretRef: {name: mosquitto-admin, namespace: craftainer-system}
-  allowedNamespaces: {}
+  allowedNamespaces: {from: All}
 ---
 apiVersion: mqtt.craftainer.dev/v1alpha1
 kind: MqttBroker
@@ -324,7 +372,8 @@ spec:
 
 ### `MqttUser` (namespaced claim, credential kind)
 
-Includes `ClaimCommon` (default `deletionPolicy: Delete`), `Credentials`.
+Includes `ClaimCommon`, `Credentials`. No `deletionPolicy`: the user and both
+clients are always deleted with the claim.
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
@@ -353,7 +402,7 @@ spec:
 
 ## Group `cache.craftainer.dev` (operator-cache, Valkey / Redis ACL)
 
-Binding type `redis`. Group default `deletionPolicy`: `Delete`.
+Binding type `redis`.
 
 ### `ClusterCacheServer` (cluster scoped) and `CacheServer` (namespaced)
 
@@ -375,7 +424,9 @@ spec:
   host: valkey.cache.svc.cluster.local
   adminCredentialsSecretRef: {name: valkey-admin, namespace: craftainer-system}
   allowedNamespaces:
-    matchLabels: {craftainer.dev/cache: allowed}
+    from: Selector
+    selector:
+      matchLabels: {craftainer.dev/cache: allowed}
 ---
 apiVersion: cache.craftainer.dev/v1alpha1
 kind: CacheServer
@@ -387,7 +438,8 @@ spec:
 
 ### `CacheUser` (namespaced claim, credential kind)
 
-Includes `ClaimCommon` (default `deletionPolicy: Delete`), `Credentials`.
+Includes `ClaimCommon`, `Credentials`. No `deletionPolicy`: the ACL user is
+always deleted with the claim.
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
@@ -413,7 +465,7 @@ spec:
 
 ## Group `oidc.craftainer.dev` (operator-oidc, Keycloak and RFC 7591/7592)
 
-Binding type `oidc`. Group default `deletionPolicy`: `Delete`.
+Binding type `oidc`.
 
 ### `ClusterIdentityProvider` (cluster scoped) and `IdentityProvider` (namespaced)
 
@@ -446,7 +498,9 @@ spec:
   keycloak: {baseURL: https://sso.example.com, realm: craftainer}
   adminCredentialsSecretRef: {name: kc-operator, namespace: craftainer-system}
   allowedNamespaces:
-    matchLabels: {craftainer.dev/oidc: allowed}
+    from: Selector
+    selector:
+      matchLabels: {craftainer.dev/oidc: allowed}
 ---
 apiVersion: oidc.craftainer.dev/v1alpha1
 kind: IdentityProvider
@@ -462,8 +516,9 @@ spec:
 
 ### `OidcClient` (namespaced claim, credential kind)
 
-Includes `ClaimCommon` (default `deletionPolicy: Delete`), `Credentials`
-(`rotationPolicy` allowed only when `public: false`, CEL).
+Includes `ClaimCommon`, `Credentials` (`rotationPolicy` allowed only when
+`public: false`, CEL). No `deletionPolicy`: the client is always deleted with
+the claim.
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
