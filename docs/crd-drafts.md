@@ -39,7 +39,7 @@ Cluster servers add:
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
 | `allowedNamespaces.from` | enum | yes | none | `All`, `Selector` (the Gateway API `FromNamespaces` values without `Same`) |
-| `allowedNamespaces.selector` | `metav1.LabelSelector` | iff `from: Selector` | none | `matchLabels` and `matchExpressions` maxItems 20; CEL: absent when `from: All`, present with at least one of `matchLabels`, `matchExpressions` when `from: Selector` |
+| `allowedNamespaces.selector` | `metav1.LabelSelector` | iff `from: Selector` | none | `matchLabels` maxProperties 20, `matchExpressions` maxItems 20; CEL: absent when `from: All`; when `from: Selector`, present and `size(matchLabels) + size(matchExpressions) > 0` (absent counts as 0), so an empty selector cannot match everything |
 
 `allowedNamespaces` is itself required (CRD `required`), so a cluster server
 without it is rejected at admission: it fails closed. Namespaced servers have

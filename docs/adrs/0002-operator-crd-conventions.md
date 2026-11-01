@@ -145,11 +145,15 @@ We will follow the conventions below in every operator and in
     `from`, and no value that means "no namespace" or "same namespace" on a
     cluster server. CEL on `allowedNamespaces` rejects `selector` when
     `from: All`, a missing `selector` when `from: Selector`, and a
-    `Selector` with neither `matchLabels` nor `matchExpressions` (an empty
-    `metav1.LabelSelector` matches everything; `from: All` is how that is
-    said). If a stored object nevertheless lacks the field (written before
-    the schema, or by a bypassed webhook), the controller treats it as
-    allowing no namespace.
+    `Selector` whose `matchLabels` and `matchExpressions` are both absent or
+    empty (an empty `metav1.LabelSelector` matches everything; `from: All` is
+    how that is said). `matchLabels` is a map and takes `maxProperties`,
+    `matchExpressions` a list and takes `maxItems`. If a stored object
+    nevertheless lacks the field or holds an empty selector (written before
+    the schema, or past a bypassed webhook), the controller treats it as
+    allowing no namespace. There is no migration: the earlier label-selector
+    shape (where `{}` meant all) was only a draft and was never implemented or
+    released.
   - A namespaced server has no `allowedNamespaces` field. It is implicitly
     `Same`: only claims in the server's own namespace may use it.
 - A claim references its server with `serverRef: {kind, name}`. The kind
@@ -235,13 +239,15 @@ dropping a condition it cannot evaluate).
   data kind; they still accept the variable (so one Helm value serves all
   five) but do not use it.
 - **The effective policy is observable.** On every reconcile the controller
-  writes `status.effectiveDeletionPolicy` (the policy that deletion will use
-  now) and `status.deletionPolicySource` (`Spec` or `OperatorDefault`). It
+  writes `status.effectiveDeletionPolicy` (the policy in force at that
+  reconcile) and `status.deletionPolicySource` (`Spec` or `OperatorDefault`).
+  Status can lag: a claim that is paused or has a long poll interval does not
+  see an operator restart with a new default until its next reconcile, so
+  deletion re-resolves the value at that moment and a user who must be sure
+  sets `spec.deletionPolicy` explicitly. The controller
   emits a Normal Event `DeletionPolicyResolved` when either value is first set
   or changes, for example after the operator is restarted with another
-  default. Deletion applies the value it resolves at that moment from the spec
-  and the operator's configuration. The operator logs the configured default
-  once at startup.
+  default. The operator logs the configured default once at startup.
 - **Deletion outcome** (`P` is whether `managementPolicies` permits `Delete`):
 
   | Kind | `P` | Effective policy | External object | Event |
@@ -294,10 +300,14 @@ list is rejected at admission):
 - Any subset of `Create`, `Update`, `Delete`, `LateInitialize` plus `Observe`
   is valid. Common ones, as in Crossplane's table: `["Observe"]` (observe
   only, and the way to adopt an existing object), `["Observe", "Create",
-  "Update"]` (never delete the external object), `["Observe", "Create",
+  "Update"]` (never delete the external object; on a credential-bearing kind
+  this orphans the live credential, section 4), `["Observe", "Create",
   "Delete"]` (never change it after creation).
-- `rotationPolicy` and the `craftainer.dev/rotate` annotation need `Update`
-  (or `*`); CEL rejects a `rotationPolicy` on a claim whose list lacks it.
+- `rotationPolicy` needs `Update` (or `*`). The CEL rule is on the whole
+  spec, so it also rejects an edit that drops `Update` while `rotationPolicy`
+  is set. The `craftainer.dev/rotate` annotation is not validated at
+  admission; on a claim without `Update` the controller ignores it and sets
+  `Synced=False`, reason `ManagementPolicyBlocked`.
 
 Behaviour:
 
@@ -309,8 +319,10 @@ Behaviour:
   not permitted, the drift is reported in `Synced` (same reasons) and not
   corrected.
 - The binding Secret is written only when the backend can issue the credential
-  without modifying the object, and only when `Create` or `Update` permits
-  the write (for the credential-less kinds it is not written).
+  without modifying the object (for the credential-less kinds it is not
+  written). A claim that creates or rotates a credential needs `Create` or
+  `Update` for that; an `["Observe"]` claim writes no Secret that needs a
+  change on the backend.
 - Observe reads the object's ownership marker (section 10): an object owned
   by another claim is refused with `NameCollision`.
 - Without `Delete`, deletion orphans the external object, including the
