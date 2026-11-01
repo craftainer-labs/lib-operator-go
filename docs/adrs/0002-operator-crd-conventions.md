@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-01)
 
 The user approved the G-api decisions on 2026-11-01 (the outcomes are recorded
-in "Decisions (G-api, 2026-11-01)" at the end). This ADR becomes Accepted when
-NO1b's implementation merges, as `docs/adrs/README.md` requires.
+in "Decisions (G-api, 2026-11-01)" at the end). The ADR became Accepted when
+NO1b's implementation merged, as `docs/adrs/README.md` requires.
 
 ## Context
 
