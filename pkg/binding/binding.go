@@ -189,15 +189,15 @@ func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 type State int
 
 const (
-	// StateMissing: there is no Secret of that name.
+	// StateMissing means there is no Secret of that name.
 	StateMissing State = iota
-	// StateCurrent: the claim controls the Secret and its type, labels and
+	// StateCurrent means the claim controls the Secret and its type, labels and
 	// type and provider keys are as WriteSecret leaves them.
 	StateCurrent
-	// StateDrifted: the claim controls the Secret but its type, labels or type
+	// StateDrifted means the claim controls the Secret but its type, labels or type
 	// and provider keys were edited.
 	StateDrifted
-	// StateForeign: the Secret exists and the claim is not its controller.
+	// StateForeign means the Secret exists and the claim is not its controller.
 	StateForeign
 )
 

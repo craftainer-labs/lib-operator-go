@@ -156,22 +156,22 @@ func (r *run[S, O]) audit(action, result string, write bool) {
 	gvk, _ := apiutil.GVKForObject(cl, r.c.Scheme())
 	ref := cl.GetServerRef()
 	audit.Log(r.ctx, audit.Entry{
-		Controller:    r.opts.ManagedBy,
-		LastManager:   audit.LastManager(cl),
-		Kind:          gvk.Kind,
-		Namespace:     cl.GetNamespace(),
-		Name:          cl.GetName(),
-		UID:           cl.GetUID(),
-		Generation:    cl.GetGeneration(),
-		ExternalName:  cl.GetExternalName(),
-		Action:        action,
-		Result:        result,
-		ServerRef:     ref.Kind + "/" + ref.Name,
-		ServerHost:    r.opts.ServerHost,
-		ChangedFields: changed,
+		Controller:      r.opts.ManagedBy,
+		LastManager:     audit.LastManager(cl),
+		Kind:            gvk.Kind,
+		Namespace:       cl.GetNamespace(),
+		Name:            cl.GetName(),
+		UID:             cl.GetUID(),
+		Generation:      cl.GetGeneration(),
+		ExternalName:    cl.GetExternalName(),
+		Action:          action,
+		Result:          result,
+		ServerRef:       ref.Kind + "/" + ref.Name,
+		ServerHost:      r.opts.ServerHost,
+		ChangedFields:   changed,
 		PreviousUnknown: oldSum == "",
-		OldSpecSHA256: oldSum,
-		NewSpecSHA256: newSum,
+		OldSpecSHA256:   oldSum,
+		NewSpecSHA256:   newSum,
 	})
 }
 

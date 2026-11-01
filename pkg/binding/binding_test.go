@@ -233,7 +233,9 @@ func TestWriteSecretCollisionBehindAFilteredCache(t *testing.T) {
 func TestWriteSecretReaderFailure(t *testing.T) {
 	boom := errors.New("get boom")
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
-		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error { return boom },
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return boom
+		},
 	}).Build()
 	if err := binding.WriteSecret(context.Background(), c, owner("o", "u"), "s", binding.TypeS3, "p", nil); !errors.Is(err, boom) {
 		t.Errorf("err = %v", err)
@@ -328,7 +330,9 @@ func TestInspect(t *testing.T) {
 func TestInspectReaderFailure(t *testing.T) {
 	boom := errors.New("get boom")
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
-		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error { return boom },
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return boom
+		},
 	}).Build()
 	if _, _, err := binding.Inspect(context.Background(), c, owner("o", "u"), "s", binding.TypeS3, "p"); !errors.Is(err, boom) {
 		t.Errorf("err = %v", err)

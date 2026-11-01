@@ -138,7 +138,7 @@ func TestLogWritesTheEntry(t *testing.T) {
 	}
 	for _, want := range []string{`"msg":"audit"`, `"controller":"operator-db"`, `"lastManager":"kubectl"`, `"kind":"Database"`,
 		`"uid":"uid-1"`, `"generation":4`, `"action":"Create"`, `"serverHost":"pg.example"`,
-		`"changedFields":["extensions"]`, `"previousUnknown":true`,`"oldSpecSHA256":"old"`, `"newSpecSHA256":"new"`} {
+		`"changedFields":["extensions"]`, `"previousUnknown":true`, `"oldSpecSHA256":"old"`, `"newSpecSHA256":"new"`} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("log line lacks %s: %s", want, lines[0])
 		}
