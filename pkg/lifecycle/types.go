@@ -49,8 +49,9 @@ type External[S, O any] interface {
 	// Create makes the external object. The returned data goes to the binding
 	// Secret of a credential kind; a data kind returns nil.
 	Create(ctx context.Context, spec S) (binding.Data, error)
-	// Update makes the object match the spec. The returned data, if any, goes to
-	// the binding Secret.
+	// Update makes the object match the spec. The returned data goes to the
+	// binding Secret; a credential kind must return it (ErrNoBindingData
+	// otherwise), a data kind returns nil.
 	Update(ctx context.Context, spec S, cur O) (binding.Data, error)
 	// Delete removes the object.
 	Delete(ctx context.Context, cur O) error
