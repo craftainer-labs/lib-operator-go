@@ -12,20 +12,25 @@ service-binding Secret writer. Module path
 [`docs/TEMPLATE.md`](docs/TEMPLATE.md) for the conventions shared by every
 instance.
 
-**Status: skeleton.** The package layout and the interface declarations exist;
-the implementation follows once the API shapes are accepted. The conventions
-every operator follows are proposed in
+**Status: implemented.** The packages below implement the conventions in
 [`docs/adrs/0002-operator-crd-conventions.md`](docs/adrs/0002-operator-crd-conventions.md)
-and the draft CRDs of all five groups are in
-[`docs/crd-drafts.md`](docs/crd-drafts.md).
+(Accepted) with 100% statement coverage. The draft CRDs of all five groups are
+in [`docs/crd-drafts.md`](docs/crd-drafts.md). The FIPS CI job and the
+`GOFIPS140` release build are not set up yet.
 
 | Package | Purpose |
 | --- | --- |
-| `pkg/lifecycle` | `External`, `Rotator` and `Claim` interfaces and `Reconcile` |
+| `pkg/apis/common` | Shared API types: conditions, references, management policies, selectors |
+| `pkg/lifecycle` | `External`, `Rotator` and `Claim` interfaces and `Reconcile`, delete and rotation handling |
+| `pkg/lifecycle/lifecycletest` | Fakes for testing operators built on `pkg/lifecycle` |
 | `pkg/server` | `Resolve`: server lookup that enforces `allowedNamespaces` |
 | `pkg/binding` | `WriteSecret`: `servicebinding.io/<type>` Secrets |
 | `pkg/naming` | `Tenant`: deterministic, collision-safe external names |
 | `pkg/conditions` | `Ready`, `Synced`, `ServerReachable` |
+| `pkg/audit` | Structured audit log (who, what, when, spec-change hashes), with an in-memory tracker |
+| `pkg/dcr` | Dynamic client registration state (RFC 7591/7592) kept in the operator namespace |
+| `pkg/testenv` | envtest helpers for operator tests |
+| `pkg/internal/testapi` | Test-only API types (not importable outside the module) |
 
 ## Checks and the coverage gate
 

@@ -2,11 +2,11 @@
 
 ## Status
 
-Proposed
+Accepted (2026-11-01)
 
 The user approved the G-api decisions on 2026-11-01 (the outcomes are recorded
-in "Decisions (G-api, 2026-11-01)" at the end). This ADR becomes Accepted when
-NO1b's implementation merges, as `docs/adrs/README.md` requires.
+in "Decisions (G-api, 2026-11-01)" at the end). The ADR became Accepted when
+NO1b's implementation merged, as `docs/adrs/README.md` requires.
 
 ## Context
 
@@ -483,7 +483,13 @@ The framework drives a small state machine from `status.rotation`
 3. **Grace.** The claim stays `Ready=True`; `Synced` reason `Rotating`. The
    controller re-queues at `retireAfter`.
 4. **Finish.** At `retireAfter`, call `RotateFinish`, then clear `previous`
-   and `retireAfter`. A new rotation is not begun while `previous` is set.
+   and `retireAfter`. A new rotation is not begun while `previous` is set. A
+   `craftainer.dev/rotate` value that arrives during a grace period is consumed
+   and rejected (`lastTrigger` is updated, Warning Event `RotationDeferred`),
+   not queued: the user sets a new value after the grace period ends. A
+   `gracePeriod` of 0 (not admitted by the schema's minimum, but possible in a
+   stored object) is a hard cut: `RotateFinish` runs in the same reconcile,
+   right after the binding Secret is written.
 
 `rotationPolicy` is `{interval: Duration (optional, min 1h, max 8760h), gracePeriod:
 Duration (default 1h, min 5m, max 168h)}`. Events: `RotationStarted`,
