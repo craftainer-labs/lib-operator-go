@@ -1,8 +1,8 @@
 # CRD drafts for the five craftainer.dev groups
 
 API for the five groups, written to the conventions of
-[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted, 2026-11-01, with
-the G-api decisions folded in). All kinds are `v1alpha1`. Nothing here is
+[ADR 0002](adrs/0002-operator-crd-conventions.md) (Proposed; the user approved
+the G-api decisions on 2026-11-01 and they are folded in). All kinds are `v1alpha1`. Nothing here is
 implemented; the field tables are what the API types and CRD schemas will be
 generated from. The shared blocks are Go types in `lib-operator-go`'s
 `pkg/apis/common`, which the operators embed.
