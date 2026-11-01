@@ -86,7 +86,9 @@ section 4). The mqtt, cache and oidc groups have no data kind.
 | `rotationPolicy.interval` | duration | no | none (rotate on trigger only) | min `1h`, max `8760h` |
 | `rotationPolicy.gracePeriod` | duration | no | `1h` | min `5m`, max `168h` |
 
-CEL on `rotationPolicy`: `managementPolicies` is `["*"]` or contains `Update`.
+CEL on the claim spec of each credential kind (it has to see both fields, so
+it cannot sit on `rotationPolicy` itself): `!has(self.rotationPolicy) ||
+self.managementPolicies == ['*'] || 'Update' in self.managementPolicies`.
 
 The annotation `craftainer.dev/rotate: "<any new value>"` triggers one
 rotation (it also needs `Update`); `craftainer.dev/poll-interval:
@@ -102,6 +104,7 @@ rotation (it also needs `Update`); `craftainer.dev/poll-interval:
 | `externalName` | string | derived name from `naming.Tenant`; maxLength 255 |
 | `externalId` | string | backend-assigned id, where there is one; maxLength 255 |
 | `lastReconcileTime` | time | |
+| `lateInitialized` | map of string | values recorded under `LateInitialize`; maxProperties 20, values maxLength 255 |
 
 Data kinds add:
 

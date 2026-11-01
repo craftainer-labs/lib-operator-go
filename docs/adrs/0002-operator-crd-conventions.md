@@ -151,7 +151,13 @@ We will follow the conventions below in every operator and in
     `matchExpressions` a list and takes `maxItems`. If a stored object
     nevertheless lacks the field or holds an empty selector (written before
     the schema, or past a bypassed webhook), the controller treats it as
-    allowing no namespace. There is no migration: the earlier label-selector
+    allowing no namespace. CEL cannot tell a non-empty selector that still
+    matches every namespace (`DoesNotExist`, `NotIn` an unused value) from a
+    narrow one, so the server author owns that. Prefer
+    `kubernetes.io/metadata.name`: a selector on any other label is satisfied
+    by whoever may `patch` namespaces, and the examples in the drafts that use
+    a custom label assume that right is cluster-admin only. There is no
+    migration: the earlier label-selector
     shape (where `{}` meant all) was only a draft and was never implemented or
     released.
   - A namespaced server has no `allowedNamespaces` field. It is implicitly
@@ -208,6 +214,7 @@ Every claim has this common status (`ClaimStatus`):
   Provisioned Service in the [Service Binding spec] sense.
 - `rotation`: see section 8.
 - `lastReconcileTime`.
+- `lateInitialized`: see `LateInitialize` in section 5.
 - Data kinds only: `effectiveDeletionPolicy` (`Delete` or `Retain`) and
   `deletionPolicySource` (`Spec` or `OperatorDefault`), see section 4.
 
@@ -255,7 +262,8 @@ dropping a condition it cannot evaluate).
   | credential | yes | n/a | deleted | `Deleted` |
   | data | yes | `Delete` | deleted | `Deleted` |
   | data | yes | `Retain` | left in place | `Retained` |
-  | any | no | any | left in place (orphaned) | Warning `ExternalObjectOrphaned` |
+  | any | no, and the list has `Create` or `Update` | any | left in place (orphaned) | Warning `ExternalObjectOrphaned` |
+  | any | no, and the list is `["Observe"]` | any | left in place (never ours) | Normal `Retained` |
 
   Without `Delete` in `managementPolicies` the operator never deletes the
   external object, as in Crossplane, where an external resource without the
@@ -266,6 +274,12 @@ dropping a condition it cannot evaluate).
   that its credential is still valid, and the operator logs it. The binding
   Secret is still deleted with the claim. Anyone who writes a policy list
   without `Delete` on a credential-bearing kind is choosing that outcome.
+- `craftainer.dev/paused` stops spec changes, drift correction and rotation,
+  not deletion: a deleted paused claim still runs the finalizer as above.
+- For an `OidcClient` on a `DynamicRegistration` server that is orphaned, the
+  operator keeps the `dcr-<claim uid>` Secret (section 9) instead of removing
+  it, relabelled `craftainer.dev/orphaned=true`, so the client stays
+  manageable through RFC 7592. It is the cluster administrator's to delete.
 - Deleting a claim whose server is unreachable blocks on the finalizer with
   `Synced=False`, reason `ServerUnreachable`, and an Event; it never drops
   the finalizer silently. A user who must force it removes the finalizer by
@@ -285,7 +299,7 @@ meanings ([Crossplane managed resources], "managementPolicies"). The values:
 | `Create` | If the external object does not exist, the controller creates it from the spec. |
 | `Update` | The controller changes the external object to match the spec: field changes, drift correction, and credential rotation (section 8). |
 | `Delete` | The controller may delete the external object when the claim is deleted (section 4). |
-| `LateInitialize` | The controller records backend-assigned values of optional fields that the spec leaves unset in `status`, never in `spec`. A kind with no such field accepts the value and does nothing. |
+| `LateInitialize` | The controller records backend-assigned values of optional fields that the spec leaves unset in `status.lateInitialized` (a map of field name to value), never in `spec` (Crossplane writes them into `spec`; we do not write `spec`). A kind with no such field accepts the value and does nothing. |
 
 The default is `["*"]`. Valid combinations (CEL on the field; every other
 list is rejected at admission):
@@ -538,7 +552,7 @@ Callers subtract any suffix they append from `maxLen` (the rotation suffixes
 | Backend object | `sep` | `maxLen` passed | Limit and where it comes from |
 | --- | --- | --- | --- |
 | PostgreSQL database, owner role | `_` | 63 (login roles: 61, then `_a`/`_b`) | identifier limit of 63 bytes (`NAMEDATALEN` 64 minus the terminator, [PostgreSQL docs]); always quoted with `pgx.Identifier` since `-` is legal only quoted |
-| S3 bucket (RustFS) | `-` | 63 | bucket names are 3 to 63 lowercase characters, digits, hyphens; the hashed branch always ends alphanumeric |
+| S3 bucket (RustFS) | `-` | 63 | bucket names are 3 to 63 lowercase characters, digits, hyphens; every result ends in the hash, which is alphanumeric |
 | S3 user and service account (RustFS) | `-` | 63 (not verified, see below) | service-account secret keys at most 40 characters (NR4); the access-key and user-name bounds are not in the NR4 findings |
 | MQTT username and client id (Mosquitto) | `-` | 128, then `-a`/`-b` (126) | the MQTT string limit is 65535 bytes; 128 is our cap |
 | MQTT topic root | `/` | not derived by `Tenant` | the root is `<ns>/` (no hash, no truncation), so tenant ACL patterns are `<ns>/...` |
@@ -654,10 +668,13 @@ are written to these outcomes.
 3. Both server tiers ship in `v1alpha1`.
 4. `managementPolicies`: Crossplane's full set (`*`, `Observe`, `Create`,
    `Update`, `Delete`, `LateInitialize`), default `["*"]` (section 5).
-   Judgement calls made in writing it down: `LateInitialize` records values in
-   `status`, not `spec`; an explicit list must contain `Observe`; an empty
-   list is invalid; and without `Delete` credentials are not deleted
-   (section 4).
+   The author made these calls while writing it down, and the user did not
+   decide them: `LateInitialize` records values in `status.lateInitialized`,
+   not `spec`; an explicit list must contain `Observe`; an empty list is
+   invalid; without `Delete` credentials are not deleted (section 4); a
+   paused claim is still deleted; deletion re-resolves the data kinds' default
+   at that moment; a `Selector` may not be empty; an orphaned DCR client
+   keeps its registration Secret.
 5. Deletion: credential-bearing kinds are always deleted and have no
    `deletionPolicy`; data kinds keep `spec.deletionPolicy`, whose default is
    the operator environment variable `DEFAULT_DATA_DELETION_POLICY`
