@@ -110,7 +110,7 @@ Data kinds add:
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `effectiveDeletionPolicy` | enum | `Delete` or `Retain`: the default pinned at the claim's first reconcile. Deletion honours it, not the current env var, unless `spec.deletionPolicy` is set, which deletion reads directly and which never changes this field |
+| `effectiveDeletionPolicy` | enum | `Delete` or `Retain`: the default pinned at the claim's first reconcile. Deletion honours it, not the current env var, unless `spec.deletionPolicy` is set; the policy in force is the spec value when set, otherwise this field, and the spec value never changes this field |
 | `deletionPolicySource` | enum | `OperatorDefault` (pinned from the env var) or `Fallback` (status was lost; pinned to `Retain`) |
 
 The first reconcile pins the default and emits the Normal Event

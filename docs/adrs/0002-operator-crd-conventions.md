@@ -246,27 +246,36 @@ dropping a condition it cannot evaluate).
   data kind; they still accept the variable (so one Helm value serves all
   five) but do not use it.
 - **The default is pinned at creation.** The first reconcile of a data
-  claim adds the finalizer and, in the same status write and before any
-  external action, records the resolved default in
-  `status.effectiveDeletionPolicy` with `status.deletionPolicySource:
-  OperatorDefault`, and emits a Normal Event `DeletionPolicyResolved`. A claim
+  claim records the resolved default in `status.effectiveDeletionPolicy` with
+  `status.deletionPolicySource: OperatorDefault` (a status write), emits a
+  Normal Event `DeletionPolicyResolved`, and only then adds the finalizer
+  (a metadata patch) and starts any external action. A crash between the two
+  leaves a pin without a finalizer, which the next reconcile completes; the
+  reverse order would look like lost status. A claim
   deleted before its first reconcile has created nothing externally, so there
   is nothing for a policy to act on. Deletion honours the recorded value,
   never the current environment variable, so changing
   `DEFAULT_DATA_DELETION_POLICY` (and restarting the operator) affects only
-  claims created afterwards. Reconciles never rewrite the recorded value.
+  claims created afterwards. Reconciles never rewrite the recorded value. The policy in force is
+  `spec.deletionPolicy` when set, otherwise `status.effectiveDeletionPolicy`;
+  status alone is therefore not the whole answer, and `kubectl` users read
+  both.
 - **An explicit `spec.deletionPolicy` wins and is read at deletion.** It does
   not touch the pin: status keeps the pinned default, so removing the spec
   field later returns the claim to the value pinned at creation. Deletion
   reads the spec value itself, so an edit made just before deleting counts.
 - **If status was lost** (an object restored from a backup or applied again
   without status; told apart from a first reconcile because the finalizer is
-  already present while `status.effectiveDeletionPolicy` is empty), and
-  `spec.deletionPolicy` is unset: the original pin is unknown, so the
-  controller pins `Retain`, the non-destructive value, whatever the current
+  already present while `status.effectiveDeletionPolicy` is empty),
+  whether or not `spec.deletionPolicy` is set (the pin matters again if the
+  field is removed): the original pin is unknown, so the controller pins `Retain`, the non-destructive value, whatever the current
   environment variable says. It records source `Fallback` and emits a Warning
   Event `DeletionPolicyRepinned` saying so. A deletion that arrives before
-  that reconcile applies the same `Retain`. This is the author's judgement
+  that reconcile applies the same `Retain` when `spec.deletionPolicy` is
+  unset (an implementation test covers the delete-before-repin path), and
+  emits the same Warning. When `managementPolicies` lacks `Delete`, both
+  Warnings are emitted (`DeletionPolicyRepinned`, then
+  `ExternalObjectOrphaned`) and the object is left in place. This is the author's judgement
   call, not a user decision: the user's lean was to re-resolve from the
   environment variable, which could turn a `Retain` claim into a `Delete`
   one after a restore with a changed default.
@@ -551,9 +560,11 @@ Rules:
    row of the table below has a marker and uses `HashShort`. A DCR client is
    found by the `client_id` the IdP assigned (`status.externalId`), never by
    name, so a name clash cannot make the operator adopt another tenant's
-   client; the long hash only keeps display names apart. The table's `hl`
-   column is asserted by a table-driven test in `naming`, so a caller cannot
-   pass the wrong length for a backend unnoticed.
+   client. The long hash there is not needed for safety; the rule is applied
+   to every markerless object so it stays mechanical. `naming` exports the
+   two constants only; each operator carries a test asserting the `hl` it
+   passes for each of its objects, because `naming` does not know its
+   callers.
 6. `cut` keeps at least 5 characters of `readable` (`maxLen - len(sep) -
    hl >= 5`). `ns` starts with an alphanumeric character, so the visible
    prefix is never empty after stripping.
@@ -603,9 +614,9 @@ Callers subtract any suffix they append from `maxLen` (the rotation suffixes
 The two limits marked "not verified" are added to that operator's NOxb open
 checks. If a backend turns out shorter, only the `maxLen` constant changes:
 the rules do not. The long hash needs `maxLen` of at least 22; every
-`HashLong` row passes 63 or more (the rotation generations of RustFS
-service accounts are separate access keys, not name suffixes, so no budget
-is subtracted), so that holds unless the RustFS user-name
+`HashLong` row passes 63 or more (Valkey rotates by adding passwords to the same user, and the rotation
+generations of RustFS service accounts are separate access keys, so neither
+appends a name suffix and no budget is subtracted), so that holds unless the RustFS user-name
 limit turns out below 22, in which case the item escalates instead of
 shortening the hash.
 
