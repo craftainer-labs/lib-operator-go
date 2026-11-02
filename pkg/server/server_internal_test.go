@@ -46,9 +46,9 @@ type (
 	v1Server       struct{ testapi.ClusterWidgetServer }
 )
 
-func (s *v1beta2Server) DeepCopyObject() runtime.Object { c := *s; return &c }
+func (s *v1beta2Server) DeepCopyObject() runtime.Object  { c := *s; return &c }
 func (s *v1beta10Server) DeepCopyObject() runtime.Object { c := *s; return &c }
-func (s *v1Server) DeepCopyObject() runtime.Object { c := *s; return &c }
+func (s *v1Server) DeepCopyObject() runtime.Object       { c := *s; return &c }
 
 func TestNewServerPicksTheLatestVersionNotTheGreatestString(t *testing.T) {
 	gvk := func(version string) schema.GroupVersionKind {
