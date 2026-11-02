@@ -34,9 +34,11 @@ func (r *run[S, O]) ensureBinding(cur O) (rotationOutcome, error) {
 	// holds just the Secrets with its managed-by label, so "missing" there may be
 	// a user's unlabelled Secret of the same name (a collision), and acting on a
 	// stale "missing" would recreate a credential. A Secret the cache does show
-	// is ours; if it is stale, the next poll corrects it.
+	// is ours; if it is stale, the next poll corrects it. A drifted copy is
+	// confirmed too, because the repair rewrites the credential bytes it read, and
+	// a stale copy would put an old credential back.
 	state, secret, err := binding.Inspect(r.ctx, r.c, cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
-	if err == nil && state == binding.StateMissing && r.opts.APIReader != nil {
+	if err == nil && (state == binding.StateMissing || state == binding.StateDrifted) && r.opts.APIReader != nil {
 		state, secret, err = binding.Inspect(r.ctx, r.opts.APIReader, cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
 	}
 	if err != nil {
@@ -64,16 +66,20 @@ func (r *run[S, O]) ensureBinding(cur O) (rotationOutcome, error) {
 		out.retireIn = rs.RetireAfter.Sub(r.now) // come back when it ends, not at the next poll
 		return out, nil
 	}
+	finished := false
 	if inGrace {
 		// The grace period is over, and the rotate path is not reached while the
 		// Secret is missing: retire the previous generation here, so the new
 		// rotation below does not lose it.
-		if _, err := r.finishIfDue(rot, cur, rs); err != nil {
+		fin, err := r.finishIfDue(rot, cur, rs)
+		if err != nil {
 			return rotationOutcome{}, err
 		}
+		finished = fin.finished
 		rs = cl.GetRotationStatus()
 	}
 	out, err := r.begin(rot, cur, rs, "", cl.GetRotationPolicy())
+	out.finished = out.finished || finished
 	if err == nil {
 		r.event(corev1.EventTypeNormal, conditions.EventBindingRepaired, "Reconcile",
 			"the binding Secret %s was missing and was recreated through a rotation", name)

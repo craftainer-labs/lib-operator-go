@@ -17,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
 	"github.com/craftainer-labs/lib-operator-go/pkg/server"
@@ -387,5 +388,44 @@ func TestRotationMarkIsReadThroughTheAPIReader(t *testing.T) {
 	}
 	if n := len(rot.BeginStates()); n != 1 {
 		t.Errorf("RotateBegin calls = %d, want 1", n)
+	}
+}
+
+// A drifted Secret seen in the cache is confirmed through the API reader before
+// the repair rewrites its credential bytes.
+func TestDriftedBindingSecretIsConfirmedThroughTheAPIReader(t *testing.T) {
+	edited := boundSecret()
+	delete(edited.Labels, binding.LabelClaim)
+	h := newHarness(t, nil, gadget(), edited)
+	opts := h.credOpts()
+	reader := &failingReader{}
+	opts.APIReader = reader
+	if _, err := h.reconcileGadget(existing(), opts); err == nil {
+		t.Error("expected the API reader's error")
+	}
+	if n := reader.calls.Load(); n != 1 {
+		t.Errorf("API reader calls = %d, want 1", n)
+	}
+}
+
+// A spec change is audited even while the blocked result repeats.
+func TestSpecChangeWhileBlockedIsAudited(t *testing.T) {
+	h := newHarness(t, nil, widget(withFinalizer, pinned(common.DeletionRetain, common.SourceOperatorDefault),
+		func(w *testWidget) { w.Spec.ManagementPolicies = policies("Observe") }))
+	ext := drifted()
+	opts := h.dataOpts()
+	for _, size := range []string{"s", "s", "m"} {
+		if _, err := lifecycle.Reconcile(h.ctx, h.c, h.widget("w"), spec{Size: size}, ext, opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n := 0
+	for _, l := range h.logLines() {
+		if strings.Contains(l, `"msg":"audit"`) {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Errorf("audit lines = %d, want 2 (the first block and the spec change)", n)
 	}
 }

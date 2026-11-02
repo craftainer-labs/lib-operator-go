@@ -58,7 +58,7 @@ func Tenant(ns, name string, maxLen int, sep string, hl HashLen) string {
 	if keep := maxLen - len(sep) - int(hl); len(readable) > keep {
 		// maxLen counts bytes, as Kubernetes and the backends do, so cut at a byte
 		// offset, but never inside a multibyte rune: step back to its first byte.
-		for !utf8.RuneStart(readable[keep]) {
+		for keep > 0 && !utf8.RuneStart(readable[keep]) {
 			keep--
 		}
 		readable = readable[:keep]

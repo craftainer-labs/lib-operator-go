@@ -164,7 +164,8 @@ func (r *run[S, O]) audit(action, result string, write bool) {
 	if result == "success" {
 		r.opts.Audit.Clear(cl.GetUID(), noticeAuditResult)
 	} else {
-		write = r.opts.Audit.Notice(cl.GetUID(), noticeAuditResult, action+"/"+result)
+		// A spec change is always worth a line, even while the result repeats.
+		write = r.opts.Audit.Notice(cl.GetUID(), noticeAuditResult, action+"/"+result) || len(changed) > 0
 	}
 	if !write {
 		return

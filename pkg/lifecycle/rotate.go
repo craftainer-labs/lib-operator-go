@@ -187,8 +187,8 @@ func (r *run[S, O]) begin(rot Rotator[S, O], cur O, rs common.RotationStatus, tr
 func (r *run[S, O]) adoptIssued(rs common.RotationStatus) (Generation, bool, error) {
 	var secret corev1.Secret
 	key := client.ObjectKey{Namespace: r.claim.GetNamespace(), Name: r.claim.GetBindingSecretName()}
-	// Not the cache: a stale read that misses the mark would issue the rotation
-	// a second time.
+	// Through the API reader when the operator set one (it should): a stale
+	// cache read that misses the mark would issue the rotation a second time.
 	if err := r.bindingReader().Get(r.ctx, key, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
 			return "", false, nil

@@ -142,6 +142,7 @@ func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 	secret := &corev1.Secret{}
 	err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, secret)
 	exists := err == nil
+	var annotations map[string]string
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
@@ -152,15 +153,20 @@ func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 		if secret.Type != want {
 			// A Secret's type is immutable, so an edit of it cannot be undone in
 			// place: delete the Secret and create it again below with data.
-			if err := c.Delete(ctx, secret); client.IgnoreNotFound(err) != nil {
+			// The version read is a precondition, so a Secret rewritten in the
+			// meantime (a rotation) is not deleted; the next reconcile retries.
+			rv := secret.ResourceVersion
+			if err := c.Delete(ctx, secret, client.Preconditions{ResourceVersion: &rv}); client.IgnoreNotFound(err) != nil {
 				return fmt.Errorf("recreate secret %s/%s of type %q as %q: %w",
 					secret.Namespace, secret.Name, secret.Type, want, err)
 			}
 			exists = false
+			annotations = secret.Annotations // keep the rotation marks
 		}
 	}
 	if !exists {
-		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace()}}
+		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace(),
+			Annotations: annotations}}
 	}
 	before := secret.DeepCopy()
 	secret.Type = want

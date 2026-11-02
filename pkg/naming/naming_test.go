@@ -200,3 +200,11 @@ func TestTenantDropsTheCharacterTheLimitCuts(t *testing.T) {
 		t.Errorf("Tenant = %q", got)
 	}
 }
+
+// Input that is not valid UTF-8 is cut at a byte offset rather than panicking.
+func TestTenantToleratesInvalidUTF8(t *testing.T) {
+	got := naming.Tenant(strings.Repeat("\x80", 30), "name", 20, "-", naming.HashShort)
+	if len(got) != 1+int(naming.HashShort) || got[0] != '-' {
+		t.Errorf("Tenant = %q", got)
+	}
+}
