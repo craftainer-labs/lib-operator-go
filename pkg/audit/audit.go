@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -84,11 +85,28 @@ func LastManager(obj client.Object) string {
 // restart the first Observe of an object has no "before". It also remembers,
 // per object, the last value of a named notice, so a recurring warning is
 // raised only when its value changes.
+//
+// An object that stops being reconciled without ever reaching Forget (its
+// finalizer was removed by hand, or it was deleted while the operator was
+// down) would stay in memory for good, so entries idle for longer than idleTTL
+// are dropped.
 type Tracker struct {
-	mu      sync.Mutex
-	seen    map[types.UID]snapshot
-	notices map[types.UID]map[string]string
+	mu        sync.Mutex
+	seen      map[types.UID]snapshot
+	notices   map[types.UID]map[string]string
+	touched   map[types.UID]time.Time
+	lastSweep time.Time
+	// now is time.Now; the tests replace it.
+	now func() time.Time
 }
+
+// idleTTL is how long an object may go without an Observe or Notice before the
+// Tracker forgets it: twice the longest poll interval (24h, ADR 0002 section 6),
+// so a live object, reconciled at least every poll interval, never expires.
+const idleTTL = 48 * time.Hour
+
+// sweepEvery is how often a call looks for idle entries.
+const sweepEvery = time.Hour
 
 type snapshot struct {
 	sum    string
@@ -97,7 +115,34 @@ type snapshot struct {
 
 // NewTracker returns an empty Tracker.
 func NewTracker() *Tracker {
-	return &Tracker{seen: map[types.UID]snapshot{}, notices: map[types.UID]map[string]string{}}
+	return &Tracker{
+		seen:    map[types.UID]snapshot{},
+		notices: map[types.UID]map[string]string{},
+		touched: map[types.UID]time.Time{},
+		now:     time.Now,
+	}
+}
+
+// touchLocked marks the object as live and, at most once per sweepEvery, drops
+// the entries that have been idle for idleTTL. The caller holds t.mu.
+func (t *Tracker) touchLocked(uid types.UID) {
+	now := t.now()
+	t.touched[uid] = now
+	if now.Sub(t.lastSweep) < sweepEvery {
+		return
+	}
+	t.lastSweep = now
+	for id, at := range t.touched {
+		if now.Sub(at) > idleTTL {
+			t.forgetLocked(id)
+		}
+	}
+}
+
+func (t *Tracker) forgetLocked(uid types.UID) {
+	delete(t.seen, uid)
+	delete(t.notices, uid)
+	delete(t.touched, uid)
 }
 
 // Observe records the spec of the object and returns the sorted names of the
@@ -120,6 +165,7 @@ func (t *Tracker) Observe(uid types.UID, spec any) (changed []string, oldSum, ne
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.touchLocked(uid)
 	prev, had := t.seen[uid]
 	t.seen[uid] = cur
 	if !had {
@@ -143,8 +189,7 @@ func (t *Tracker) Observe(uid types.UID, spec any) (changed []string, oldSum, ne
 func (t *Tracker) Forget(uid types.UID) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.seen, uid)
-	delete(t.notices, uid)
+	t.forgetLocked(uid)
 }
 
 // Notice reports whether value differs from the last value noticed for key on
@@ -152,6 +197,7 @@ func (t *Tracker) Forget(uid types.UID) {
 func (t *Tracker) Notice(uid types.UID, key, value string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.touchLocked(uid)
 	last, had := t.notices[uid][key]
 	if t.notices[uid] == nil {
 		t.notices[uid] = map[string]string{}

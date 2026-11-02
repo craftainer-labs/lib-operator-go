@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/naming"
 )
@@ -162,5 +163,40 @@ func TestTenantAmbiguousReadablePart(t *testing.T) {
 	}
 	if !strings.HasPrefix(a, "team-a-db-") || !strings.HasPrefix(b, "team-a-db-") {
 		t.Errorf("readable parts differ: %q, %q", a, b)
+	}
+}
+
+// maxLen counts bytes, and a cut must not split a multibyte character.
+func TestTenantTruncatesOnARuneBoundary(t *testing.T) {
+	names := []string{
+		strings.Repeat("é", 40),
+		strings.Repeat("日", 40),
+		strings.Repeat("😀", 40),
+		"a" + strings.Repeat("é", 40),
+	}
+	for _, name := range names {
+		full := naming.Tenant("n", name, 400, "-", naming.HashShort)
+		hash := full[len(full)-int(naming.HashShort):]
+		for maxLen := 16; maxLen <= 40; maxLen++ {
+			got := naming.Tenant("n", name, maxLen, "-", naming.HashShort)
+			if !utf8.ValidString(got) {
+				t.Errorf("maxLen %d: %q is not valid UTF-8", maxLen, got)
+			}
+			if len(got) > maxLen {
+				t.Errorf("maxLen %d: %q is %d bytes", maxLen, got, len(got))
+			}
+			if !strings.HasSuffix(got, "-"+hash) {
+				t.Errorf("maxLen %d: %q lost its hash", maxLen, got)
+			}
+		}
+	}
+}
+
+// A cut that falls inside a character drops that whole character.
+func TestTenantDropsTheCharacterTheLimitCuts(t *testing.T) {
+	// keep = 20 - 1 - 10 = 9 bytes; "n-" and three é are 8, the fourth é would end at 10.
+	got := naming.Tenant("n", strings.Repeat("é", 10), 20, "-", naming.HashShort)
+	if !strings.HasPrefix(got, "n-ééé-") || len(got) != len("n-ééé-")+int(naming.HashShort) {
+		t.Errorf("Tenant = %q", got)
 	}
 }

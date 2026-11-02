@@ -421,6 +421,11 @@ provider, data)`:
 Keys are the Secret's `data` keys (base64 on the wire, bytes in Go). The
 non-credential keys are repeated in the Secret so a workload needs one mount.
 
+A Secret's `type` is immutable. When the claim's binding Secret exists with
+another type (someone edited it), the library deletes it and creates it again
+with the same keys and the right type, once, instead of reporting the drift on
+every reconcile.
+
 ### 8. Two-phase credential rotation (replaces I1's `Rotate`)
 
 I1 had a single `Rotate(ctx, cur) (binding.Data, error)`. NR4 (3) showed that
@@ -498,6 +503,18 @@ overlap implements `RotateBegin` as the hard cut and `RotateFinish` as a
 no-op; the Event reason is then `RotatedWithoutOverlap` so operators of the
 workloads know the old secret died immediately.
 
+Rotation is safe against a failed status write. After `RotateBegin` and the
+binding Secret write, the library marks the Secret with the annotations
+`craftainer.dev/rotation-sequence` and `craftainer.dev/rotation-generation`,
+and only then records the rotation in `status.rotation`. If that status write
+fails, the next reconcile finds a mark whose sequence is `status.rotation.sequence + 1`,
+adopts the generation it names and records it, without calling `RotateBegin`
+again. An Observe-only claim (`managementPolicies: [Observe]`) never calls
+`RotateBegin` or `RotateFinish`. A binding Secret that goes missing while a
+grace period runs makes the reconcile return when the grace period ends (the
+shortest positive requeue wins); once it has ended, the previous generation is
+retired and the Secret is recreated by a rotation in the same reconcile.
+
 Per backend (from NR4; the live checks that belong to each operator's NOxb
 item are not repeated here):
 
@@ -556,7 +573,9 @@ Rules:
 3. **The hash is always appended.** The result is
    `cut(readable, maxLen - len(sep) - hl) + sep + h`, where `cut` truncates
    and then strips trailing `-`, `.`, `_`, `/` and `:` so no empty segment or
-   double separator results. The result is never longer than `maxLen`, and
+   double separator results. `maxLen` counts bytes, as the backends and
+   Kubernetes do, and `cut` never splits a multibyte UTF-8 character: it
+   steps back to the character's first byte. The result is never longer than `maxLen`, and
    there is no branch that returns `readable` unchanged.
 4. `Tenant` panics (a programmer error found by the first test run, never by
    user input) when `maxLen < hl + len(sep) + 5` (16 with `HashShort`, 22
@@ -651,6 +670,12 @@ name containing `.`).
   source: the server ref and endpoint host; before and after: the names of the
   changed spec fields and a SHA-256 of the old and new spec, never their
   values). The Kubernetes API server's audit log holds the request's source IP.
+- A blocked or failed result is written to the log when it differs from the
+  last one written for the claim, not on every poll; a success starts over.
+  The in-memory tracker behind this and the spec fingerprints drops a claim on
+  deletion and any claim not reconciled for 48 hours (twice the longest poll
+  interval), so a claim whose finalizer was removed by hand does not stay in
+  memory.
 - Credentials, tokens and Secret data are never in Events, logs, conditions or
   status. The tests assert that for the binding data.
 

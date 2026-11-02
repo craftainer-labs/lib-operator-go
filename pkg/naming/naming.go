@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // HashLen is the number of base32 characters of the appended hash.
@@ -33,7 +34,9 @@ var encoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 // the readable ns+sep+name, cut so that the result fits maxLen, then sep and
 // the hash. The hash is the first hl characters of the lower-case base32 of
 // SHA-256(len(ns) ":" ns ":" name), so it never depends on sep. The result is
-// never longer than maxLen and always ends in the hash.
+// never longer than maxLen bytes (not runes: backends and Kubernetes count
+// bytes), never cuts a multibyte UTF-8 character in half, and always ends in
+// the hash.
 //
 // Tenant panics on a programmer error: hl is neither HashShort nor HashLong,
 // sep is not exactly one byte, ns or name is empty, or maxLen is below
@@ -53,6 +56,11 @@ func Tenant(ns, name string, maxLen int, sep string, hl HashLen) string {
 	hash := strings.ToLower(encoding.EncodeToString(sum[:]))[:hl]
 	readable := ns + sep + name
 	if keep := maxLen - len(sep) - int(hl); len(readable) > keep {
+		// maxLen counts bytes, as Kubernetes and the backends do, so cut at a byte
+		// offset, but never inside a multibyte rune: step back to its first byte.
+		for !utf8.RuneStart(readable[keep]) {
+			keep--
+		}
 		readable = readable[:keep]
 	}
 	return strings.TrimRight(readable, trimmed) + sep + hash

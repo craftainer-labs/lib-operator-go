@@ -129,8 +129,8 @@ func newWriteConfig(opts []WriteOption) writeConfig {
 // provider keys. It returns ErrNameCollision when the Secret exists and owner
 // is not its controller, whether the existing Secret is seen by the reader or
 // only discovered when the create fails with AlreadyExists. A Secret's type is
-// immutable, so a different type on an existing Secret is an error. A Secret
-// that already matches is not written.
+// immutable, so a Secret the owner controls whose type differs is deleted and
+// created again with data. A Secret that already matches is not written.
 func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 	name, typ, provider string, data Data, opts ...WriteOption) error {
 	cfg := newWriteConfig(opts)
@@ -150,10 +150,16 @@ func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 			return fmt.Errorf("%w: %s/%s", ErrNameCollision, secret.Namespace, secret.Name)
 		}
 		if secret.Type != want {
-			return fmt.Errorf("secret %s/%s has type %q, want %q (a Secret's type is immutable)",
-				secret.Namespace, secret.Name, secret.Type, want)
+			// A Secret's type is immutable, so an edit of it cannot be undone in
+			// place: delete the Secret and create it again below with data.
+			if err := c.Delete(ctx, secret); client.IgnoreNotFound(err) != nil {
+				return fmt.Errorf("recreate secret %s/%s of type %q as %q: %w",
+					secret.Namespace, secret.Name, secret.Type, want, err)
+			}
+			exists = false
 		}
-	} else {
+	}
+	if !exists {
 		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: owner.GetNamespace()}}
 	}
 	before := secret.DeepCopy()
