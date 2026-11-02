@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -150,12 +151,28 @@ func Resolve(ctx context.Context, c client.Client, claimNS string, ref Ref, opts
 	return connection(ctx, c, srv, secretNS)
 }
 
+// serverTypes caches which registered type serves a kind, so Resolve does not
+// walk every type of the scheme on each reconcile. A scheme is complete before
+// the manager starts, so a successful lookup does not change; a failed one is
+// not cached.
+var serverTypes sync.Map
+
+type serverTypeKey struct {
+	scheme *runtime.Scheme
+	kind   string
+}
+
 // newServer returns a new object of the registered Server type of that kind.
 // When a kind is registered in several versions or groups, the greatest group
 // wins, and within a group the latest version by Kubernetes version priority
 // (v1 over v1beta2 over v1alpha1, and v1beta10 over v1beta2), never by string
 // order; an operator registers one version.
 func newServer(s *runtime.Scheme, kind string) (Server, error) {
+	key := serverTypeKey{s, kind}
+	if gvk, ok := serverTypes.Load(key); ok {
+		obj, _ := s.New(gvk.(schema.GroupVersionKind))
+		return obj.(Server), nil
+	}
 	var gvks []schema.GroupVersionKind
 	for gvk := range s.AllKnownTypes() {
 		if gvk.Kind != kind {
@@ -173,6 +190,7 @@ func newServer(s *runtime.Scheme, kind string) (Server, error) {
 	latest := slices.MaxFunc(gvks, func(a, b schema.GroupVersionKind) int {
 		return cmp.Or(cmp.Compare(a.Group, b.Group), version.CompareKubeAwareVersionStrings(a.Version, b.Version))
 	})
+	serverTypes.Store(key, latest)
 	obj, _ := s.New(latest)
 	return obj.(Server), nil
 }

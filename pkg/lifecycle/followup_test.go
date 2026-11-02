@@ -3,6 +3,7 @@ package lifecycle_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -11,12 +12,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 	"github.com/craftainer-labs/lib-operator-go/pkg/lifecycle"
+	"github.com/craftainer-labs/lib-operator-go/pkg/server"
 )
 
 // Findings NO1b's review deferred to NO1c.
@@ -260,5 +263,115 @@ func TestRotationMarkOfAnotherSequenceIsIgnored(t *testing.T) {
 	}
 	if got := h.secret("g").Annotations["craftainer.dev/rotation-sequence"]; got != "1" {
 		t.Errorf("sequence mark = %q, want 1", got)
+	}
+}
+
+// The binding Secret is read through the cache first; the API reader is only
+// asked when the cache does not show it.
+type failingReader struct{ calls atomic.Int32 }
+
+func (f *failingReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
+	f.calls.Add(1)
+	return errors.New("the API reader must not be asked")
+}
+
+func (f *failingReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
+	return errors.New("unused")
+}
+
+func TestBindingSecretIsReadThroughTheCacheFirst(t *testing.T) {
+	h := newHarness(t, nil, gadget(), boundSecret())
+	opts := h.credOpts()
+	reader := &failingReader{}
+	opts.APIReader = reader
+	res, err := h.reconcileGadget(existing(), opts)
+	wantResult(t, res, err, poll)
+	if n := reader.calls.Load(); n != 0 {
+		t.Errorf("API reader calls = %d, want 0 for a Secret the cache shows", n)
+	}
+}
+
+func TestMissingBindingSecretIsConfirmedThroughTheAPIReader(t *testing.T) {
+	h := newHarness(t, nil, gadget())
+	opts := h.credOpts()
+	reader := &failingReader{}
+	opts.APIReader = reader
+	if _, err := h.reconcileGadget(existing(), opts); err == nil {
+		t.Error("expected the API reader's error")
+	}
+	if n := reader.calls.Load(); n != 1 {
+		t.Errorf("API reader calls = %d, want 1", n)
+	}
+}
+
+// A deletion that keeps failing is retried with backoff for an hour; after
+// that the finalizer stays, the errors stop, and one Warning names the way out.
+func TestDeletionBlockedLongerThanTheWindow(t *testing.T) {
+	boom := errors.New("backend boom")
+	h := newHarness(t, nil, widget(terminating, pinned(common.DeletionDelete, common.SourceOperatorDefault)))
+	ext := existing()
+	ext.DeleteErr = boom
+	at := func(d time.Duration) lifecycle.Options {
+		o := h.dataOpts()
+		o.Now = func() time.Time { return now.Add(d) }
+		return o
+	}
+	blocked := func() int {
+		n := 0
+		for _, r := range h.rec.Reasons() {
+			if r == conditions.DeletionBlocked {
+				n++
+			}
+		}
+		return n
+	}
+
+	if _, err := h.reconcileWidget(ext, at(59*time.Minute)); !errors.Is(err, boom) {
+		t.Fatalf("inside the window: err = %v, want the backend error", err)
+	}
+	wantCond(t, h.widget("w").Status.Conditions, synced, metav1.ConditionFalse, conditions.ReconcileError)
+
+	for range 3 {
+		res, err := h.reconcileWidget(ext, at(2*time.Hour))
+		wantResult(t, res, err, poll)
+	}
+	w := h.widget("w")
+	if !hasFinalizer(w) {
+		t.Error("the finalizer was dropped")
+	}
+	wantCond(t, w.Status.Conditions, synced, metav1.ConditionFalse, conditions.DeletionBlocked)
+	wantCond(t, w.Status.Conditions, ready, metav1.ConditionFalse, conditions.DeletionBlocked)
+	msg := cond(w.Status.Conditions, synced).Message
+	if !strings.Contains(msg, "backend boom") || !strings.Contains(msg, "remove the finalizer "+lifecycle.DefaultFinalizer) {
+		t.Errorf("message = %q", msg)
+	}
+	if blocked() != 1 {
+		t.Errorf("DeletionBlocked events = %d, want 1", blocked())
+	}
+
+	// The backend recovers: the deletion completes by itself.
+	ext.DeleteErr = nil
+	if _, err := h.reconcileWidget(ext, at(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.c.Get(h.ctx, client.ObjectKey{Namespace: "ns", Name: "w"}, &testWidget{}); !apierrors.IsNotFound(err) {
+		t.Errorf("claim still there: %v", err)
+	}
+}
+
+func TestDeletionBlockedByAFinalResolveErrorAfterTheWindow(t *testing.T) {
+	h := newHarness(t, nil, widget(terminating, pinned(common.DeletionDelete, common.SourceOperatorDefault)))
+	opts := h.dataOpts()
+	opts.Now = func() time.Time { return now.Add(2 * time.Hour) }
+	opts.ResolveErr = fmt.Errorf("x: %w", server.ErrServerNotFound)
+	res, err := h.reconcileWidget(nil, opts)
+	wantResult(t, res, err, poll)
+	w := h.widget("w")
+	wantCond(t, w.Status.Conditions, synced, metav1.ConditionFalse, conditions.DeletionBlocked)
+	if msg := cond(w.Status.Conditions, synced).Message; !strings.Contains(msg, "x: ") {
+		t.Errorf("message = %q: it keeps the cause", msg)
+	}
+	if !hasFinalizer(w) {
+		t.Error("the finalizer was dropped")
 	}
 }

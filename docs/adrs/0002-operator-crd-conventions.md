@@ -314,6 +314,13 @@ dropping a condition it cannot evaluate).
   `Synced=False`, reason `ServerUnreachable`, and an Event; it never drops
   the finalizer silently. A user who must force it removes the finalizer by
   hand, which is a documented, deliberate act.
+  The library retries a failing deletion with the controller's error backoff
+  for one hour from the deletion timestamp. After that the finalizer still
+  stays, but the reconcile stops returning errors: the claim gets `Synced=False`
+  and `Ready=False` with reason `DeletionBlocked`, one Warning Event
+  `DeletionBlocked` that names the finalizer to remove by hand, and a requeue at
+  the poll interval. The deletion completes by itself once the server or backend
+  recovers.
 - A `Retain`ed or orphaned external object is not adopted by the next claim of
   the same name automatically; adoption needs `managementPolicies: [Observe]`.
 

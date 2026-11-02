@@ -2,8 +2,11 @@ package lifecycle
 
 import (
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -123,4 +126,40 @@ func (r *run[S, O]) release() (ctrl.Result, error) {
 		r.opts.Audit.Forget(cl.GetUID())
 	}
 	return ctrl.Result{}, client.IgnoreNotFound(err)
+}
+
+// deletionRetryWindow is how long, from the deletion timestamp, a deletion that
+// keeps failing is retried with error backoff.
+const deletionRetryWindow = time.Hour
+
+// deletionWindowOver reports whether the claim has been terminating for longer
+// than deletionRetryWindow.
+func (r *run[S, O]) deletionWindowOver() bool {
+	ts := r.claim.GetDeletionTimestamp()
+	return !ts.IsZero() && r.now.Sub(ts.Time) >= deletionRetryWindow
+}
+
+// deletionBlocked is what a blocked deletion becomes once the window is over
+// (ADR 0002 section 4). The finalizer stays, because the library never drops it
+// over a live external object, but the noise stops: no error (so no exponential
+// backoff), Synced=False with reason DeletionBlocked, one Warning Event that
+// names the manual way out, and a requeue at the poll interval. The deletion
+// still completes by itself when the server or backend recovers.
+func (r *run[S, O]) deletionBlocked(result string, err error) (string, ctrl.Result, error) {
+	cause := result
+	if c := meta.FindStatusCondition(*r.claim.GetConditions(), conditions.Synced); c != nil {
+		cause = c.Message
+	}
+	if err != nil {
+		cause = err.Error()
+	}
+	msg := fmt.Sprintf("deletion has been blocked for more than %s and is retried every %s: %s; "+
+		"if the external object is gone for good, remove the finalizer %s by hand",
+		deletionRetryWindow, r.poll, cause, r.opts.FinalizerName)
+	r.set(conditions.Synced, metav1.ConditionFalse, conditions.DeletionBlocked, msg)
+	r.set(conditions.Ready, metav1.ConditionFalse, conditions.DeletionBlocked, msg)
+	if r.opts.Audit.Notice(r.claim.GetUID(), noticeDeletion, "blocked") {
+		r.event(corev1.EventTypeWarning, conditions.DeletionBlocked, "Delete", "%s", msg)
+	}
+	return conditions.DeletionBlocked, r.requeue(), nil
 }

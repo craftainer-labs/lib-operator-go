@@ -105,6 +105,7 @@ func (r *run[S, O]) pollInterval() time.Duration {
 const (
 	noticePollInterval = "pollInterval"
 	noticeAuditResult  = "auditResult"
+	noticeDeletion     = "deletionBlocked"
 )
 
 func (r *run[S, O]) requeue() ctrl.Result {
@@ -138,6 +139,9 @@ func (r *run[S, O]) gone(err error) error {
 // done persists the status, writes the audit line for a state change or a
 // failure, and returns the result.
 func (r *run[S, O]) done(action, result string, res ctrl.Result, err error) (ctrl.Result, error) {
+	if r.deletionWindowOver() {
+		result, res, err = r.deletionBlocked(result, err)
+	}
 	// Audit first: a status write that finds the claim gone then forgets it.
 	r.audit(action, result, action != "Observe" || result != "success")
 	if perr := r.persist(); perr != nil {

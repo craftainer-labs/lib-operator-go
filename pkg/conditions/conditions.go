@@ -41,6 +41,10 @@ const (
 	// BindingSecretMissing is the reason of a credential claim whose binding
 	// Secret is gone and cannot be recreated without the backend.
 	BindingSecretMissing = "BindingSecretMissing"
+	// DeletionBlocked is the reason of a claim whose deletion has been failing
+	// for longer than the library keeps retrying with backoff; the finalizer
+	// stays and the claim is retried at the poll interval.
+	DeletionBlocked = "DeletionBlocked"
 	// Reconciling is the reason of a condition that was set to Unknown on the
 	// first reconcile and not evaluated yet.
 	Reconciling = "Reconciling"

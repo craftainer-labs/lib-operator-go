@@ -28,7 +28,17 @@ import (
 func (r *run[S, O]) ensureBinding(cur O) (rotationOutcome, error) {
 	cl := r.claim
 	name := cl.GetBindingSecretName()
-	state, secret, err := binding.Inspect(r.ctx, r.bindingReader(), cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
+	// Read through the client (the cache) first: every poll of every credential
+	// claim would otherwise be a live GET. Only a Secret the cache does not show
+	// is looked up again through the API reader, because the operator's cache
+	// holds just the Secrets with its managed-by label, so "missing" there may be
+	// a user's unlabelled Secret of the same name (a collision), and acting on a
+	// stale "missing" would recreate a credential. A Secret the cache does show
+	// is ours; if it is stale, the next poll corrects it.
+	state, secret, err := binding.Inspect(r.ctx, r.c, cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
+	if err == nil && state == binding.StateMissing && r.opts.APIReader != nil {
+		state, secret, err = binding.Inspect(r.ctx, r.opts.APIReader, cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
+	}
 	if err != nil {
 		return rotationOutcome{}, err
 	}

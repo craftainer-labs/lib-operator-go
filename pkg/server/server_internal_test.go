@@ -78,3 +78,33 @@ func TestNewServerPicksTheLatestVersionNotTheGreatestString(t *testing.T) {
 		})
 	}
 }
+
+// The lookup walks the scheme once per kind; later calls use the cached type.
+func TestNewServerCachesTheTypeLookup(t *testing.T) {
+	s := runtime.NewScheme()
+	if err := testapi.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	key := serverTypeKey{s, "ClusterWidgetServer"}
+	if _, ok := serverTypes.Load(key); ok {
+		t.Fatal("cached before the first lookup")
+	}
+	for range 2 {
+		got, err := newServer(s, "ClusterWidgetServer")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reflect.TypeOf(got) != reflect.TypeOf(&testapi.ClusterWidgetServer{}) {
+			t.Errorf("newServer = %T", got)
+		}
+	}
+	if _, ok := serverTypes.Load(key); !ok {
+		t.Error("the lookup was not cached")
+	}
+	if _, err := newServer(s, "Nope"); err == nil {
+		t.Error("expected an error")
+	}
+	if _, ok := serverTypes.Load(serverTypeKey{s, "Nope"}); ok {
+		t.Error("a failed lookup was cached")
+	}
+}
