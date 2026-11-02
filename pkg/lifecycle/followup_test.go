@@ -375,3 +375,17 @@ func TestDeletionBlockedByAFinalResolveErrorAfterTheWindow(t *testing.T) {
 		t.Error("the finalizer was dropped")
 	}
 }
+
+// The mark is read through the API reader when there is one, never the cache.
+func TestRotationMarkIsReadThroughTheAPIReader(t *testing.T) {
+	h := newHarness(t, nil, boundSecret(), gadget(trigger("x")))
+	opts := h.credOpts()
+	opts.APIReader = h.c
+	rot := existingRot()
+	if _, err := h.reconcileGadget(rot, opts); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rot.BeginStates()); n != 1 {
+		t.Errorf("RotateBegin calls = %d, want 1", n)
+	}
+}
