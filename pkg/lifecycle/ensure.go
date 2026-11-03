@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
@@ -27,11 +28,19 @@ import (
 func (r *run[S, O]) ensureBinding(cur O) (rotationOutcome, error) {
 	cl := r.claim
 	name := cl.GetBindingSecretName()
-	reader := r.opts.APIReader
-	if reader == nil {
-		reader = r.c
+	// Read through the client (the cache) first: every poll of every credential
+	// claim would otherwise be a live GET. Only a Secret the cache does not show
+	// is looked up again through the API reader, because the operator's cache
+	// holds just the Secrets with its managed-by label, so "missing" there may be
+	// a user's unlabelled Secret of the same name (a collision), and acting on a
+	// stale "missing" would recreate a credential. A Secret the cache does show
+	// is ours; if it is stale, the next poll corrects it. A drifted copy is
+	// confirmed too, because the repair rewrites the credential bytes it read, and
+	// a stale copy would put an old credential back.
+	state, secret, err := binding.Inspect(r.ctx, r.c, cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
+	if err == nil && (state == binding.StateMissing || state == binding.StateDrifted) && r.opts.APIReader != nil {
+		state, secret, err = binding.Inspect(r.ctx, r.opts.APIReader, cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
 	}
-	state, secret, err := binding.Inspect(r.ctx, reader, cl, name, r.opts.BindingType, r.opts.Provider, r.writeOpts()...)
 	if err != nil {
 		return rotationOutcome{}, err
 	}
@@ -52,15 +61,39 @@ func (r *run[S, O]) ensureBinding(cur O) (rotationOutcome, error) {
 		return r.missing("the backend of this kind cannot issue the credential again (the External is not a Rotator)"), nil
 	case !r.pol.Update:
 		return r.missing("recreating it needs a rotation, which needs the Update management policy"), nil
-	case inGrace:
-		return r.missing("a rotation grace period is running; the Secret is recreated by a rotation once it ends"), nil
+	case inGrace && rs.RetireAfter != nil && r.now.Before(rs.RetireAfter.Time):
+		out := r.missing("a rotation grace period is running; the Secret is recreated by a rotation once it ends")
+		out.retireIn = rs.RetireAfter.Sub(r.now) // come back when it ends, not at the next poll
+		return out, nil
+	}
+	finished := false
+	if inGrace {
+		// The grace period is over, and the rotate path is not reached while the
+		// Secret is missing: retire the previous generation here, so the new
+		// rotation below does not lose it.
+		fin, err := r.finishIfDue(rot, cur, rs)
+		if err != nil {
+			return rotationOutcome{}, err
+		}
+		finished = fin.finished
+		rs = cl.GetRotationStatus()
 	}
 	out, err := r.begin(rot, cur, rs, "", cl.GetRotationPolicy())
+	out.finished = out.finished || finished
 	if err == nil {
 		r.event(corev1.EventTypeNormal, conditions.EventBindingRepaired, "Reconcile",
 			"the binding Secret %s was missing and was recreated through a rotation", name)
 	}
 	return out, err
+}
+
+// bindingReader is the reader that sees the binding Secret whatever its labels:
+// the API reader when there is one, else the client.
+func (r *run[S, O]) bindingReader() client.Reader {
+	if r.opts.APIReader != nil {
+		return r.opts.APIReader
+	}
+	return r.c
 }
 
 func (r *run[S, O]) missing(why string) rotationOutcome {

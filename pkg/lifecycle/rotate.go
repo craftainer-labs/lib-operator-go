@@ -2,12 +2,16 @@ package lifecycle
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
+	"github.com/craftainer-labs/lib-operator-go/pkg/binding"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
 )
 
@@ -46,7 +50,14 @@ func (r *run[S, O]) rotate(cur O) (rotationOutcome, error) {
 	if !ok {
 		return rotationOutcome{unsupported: policy != nil || triggered}, nil
 	}
-	if rs.Previous != "" || rs.RetireAfter != nil {
+	inGrace := rs.Previous != "" || rs.RetireAfter != nil
+	if inGrace && r.pol.ObserveOnly {
+		// An Observe-only claim never changes the backend, so it does not retire
+		// a generation either; a rotation left over from before the policies were
+		// narrowed waits until they allow it again.
+		return rotationOutcome{}, nil
+	}
+	if inGrace {
 		if triggered {
 			// A trigger during the grace period is consumed and rejected, not
 			// queued: the user sets a new value after the grace period ends.
@@ -95,19 +106,43 @@ func (r *run[S, O]) due(policy *common.RotationPolicy, rs common.RotationStatus,
 	return !r.now.Before(base.Add(interval))
 }
 
-// begin issues the next generation, writes it to the binding Secret and then
-// records it. A crash between the two repeats RotateBegin, which is idempotent.
+// The annotations of the binding Secret that say which rotation it holds. They
+// are written after the Secret's data, so their presence means the data is
+// the one of that sequence; the status is written last, and when that write
+// fails the next reconcile finds the annotations and adopts the rotation
+// instead of issuing it a second time.
+const (
+	annotationRotationSequence   = "craftainer.dev/rotation-sequence"
+	annotationRotationGeneration = "craftainer.dev/rotation-generation"
+)
+
+// begin issues the next generation, writes it to the binding Secret, marks the
+// Secret with the rotation and then records it in the status. A crash before
+// the mark repeats RotateBegin, which is idempotent; a failed status write
+// after the mark is recovered by adoptIssued.
 func (r *run[S, O]) begin(rot Rotator[S, O], cur O, rs common.RotationStatus, trigger string,
 	policy *common.RotationPolicy) (rotationOutcome, error) {
-	data, gen, err := rot.RotateBegin(r.ctx, r.spec, cur, toState(rs))
+	gen, adopted, err := r.adoptIssued(rs)
 	if err != nil {
-		r.event(corev1.EventTypeWarning, conditions.EventRotationFailed, "Rotate", "RotateBegin failed: %s", err)
-		return rotationOutcome{}, fmt.Errorf("RotateBegin: %w", err)
+		return rotationOutcome{}, err
 	}
-	if err := r.writeBinding(data); err != nil {
-		r.event(corev1.EventTypeWarning, conditions.EventRotationFailed, "Rotate",
-			"writing the binding Secret failed: %s", err)
-		return rotationOutcome{}, fmt.Errorf("write the rotated binding: %w", err)
+	if !adopted {
+		var data binding.Data
+		data, gen, err = rot.RotateBegin(r.ctx, r.spec, cur, toState(rs))
+		if err != nil {
+			r.event(corev1.EventTypeWarning, conditions.EventRotationFailed, "Rotate", "RotateBegin failed: %s", err)
+			return rotationOutcome{}, fmt.Errorf("RotateBegin: %w", err)
+		}
+		if err := r.writeBinding(data); err != nil {
+			r.event(corev1.EventTypeWarning, conditions.EventRotationFailed, "Rotate",
+				"writing the binding Secret failed: %s", err)
+			return rotationOutcome{}, fmt.Errorf("write the rotated binding: %w", err)
+		}
+		if err := r.markIssued(rs.Sequence+1, gen); err != nil {
+			r.event(corev1.EventTypeWarning, conditions.EventRotationFailed, "Rotate",
+				"marking the binding Secret failed: %s", err)
+			return rotationOutcome{}, fmt.Errorf("mark the rotated binding: %w", err)
+		}
 	}
 	hardCut := false
 	if h, ok := rot.(HardCutRotator); ok {
@@ -144,6 +179,40 @@ func (r *run[S, O]) begin(rot Rotator[S, O], cur O, rs common.RotationStatus, tr
 		return fin, nil
 	}
 	return out, nil
+}
+
+// adoptIssued reports whether the binding Secret already holds the rotation
+// that follows rs: the rotation was issued and written, and only the status
+// write after it failed. It returns that rotation's generation.
+func (r *run[S, O]) adoptIssued(rs common.RotationStatus) (Generation, bool, error) {
+	var secret corev1.Secret
+	key := client.ObjectKey{Namespace: r.claim.GetNamespace(), Name: r.claim.GetBindingSecretName()}
+	// Through the API reader when the operator set one (it should): a stale
+	// cache read that misses the mark would issue the rotation a second time.
+	if err := r.bindingReader().Get(r.ctx, key, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read the binding Secret: %w", err)
+	}
+	gen := secret.Annotations[annotationRotationGeneration]
+	if gen == "" || !metav1.IsControlledBy(&secret, r.claim) ||
+		secret.Annotations[annotationRotationSequence] != strconv.FormatInt(rs.Sequence+1, 10) {
+		return "", false, nil
+	}
+	return Generation(gen), true, nil
+}
+
+// markIssued records on the binding Secret that it holds the rotation with the
+// sequence and generation, without touching its data.
+func (r *run[S, O]) markIssued(sequence int64, gen Generation) error {
+	orig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: r.claim.GetNamespace(), Name: r.claim.GetBindingSecretName()}}
+	marked := orig.DeepCopy()
+	marked.Annotations = map[string]string{
+		annotationRotationSequence:   strconv.FormatInt(sequence, 10),
+		annotationRotationGeneration: string(gen),
+	}
+	return r.c.Patch(r.ctx, marked, client.MergeFrom(orig))
 }
 
 // finishIfDue retires the previous generation once the grace period is over.

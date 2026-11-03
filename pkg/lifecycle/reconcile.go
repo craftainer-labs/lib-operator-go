@@ -100,8 +100,13 @@ func (r *run[S, O]) pollInterval() time.Duration {
 	return d
 }
 
-// noticePollInterval is the audit.Tracker notice key of an invalid poll interval.
-const noticePollInterval = "pollInterval"
+// The audit.Tracker notice keys: an invalid poll interval, and the last
+// non-success result that was written to the audit log.
+const (
+	noticePollInterval = "pollInterval"
+	noticeAuditResult  = "auditResult"
+	noticeDeletion     = "deletionBlocked"
+)
 
 func (r *run[S, O]) requeue() ctrl.Result {
 	extra := time.Duration(float64(r.poll) * jitterFraction * r.opts.Jitter())
@@ -134,6 +139,9 @@ func (r *run[S, O]) gone(err error) error {
 // done persists the status, writes the audit line for a state change or a
 // failure, and returns the result.
 func (r *run[S, O]) done(action, result string, res ctrl.Result, err error) (ctrl.Result, error) {
+	if r.deletionWindowOver() && deletionFailed(result, err) {
+		result, res, err = r.deletionBlocked(result, err)
+	}
 	// Audit first: a status write that finds the claim gone then forgets it.
 	r.audit(action, result, action != "Observe" || result != "success")
 	if perr := r.persist(); perr != nil {
@@ -143,12 +151,21 @@ func (r *run[S, O]) done(action, result string, res ctrl.Result, err error) (ctr
 }
 
 // audit fingerprints the spec on every reconcile, so the tracker always knows
-// the previous spec, and writes the audit line only when write is true.
+// the previous spec, and writes the audit line only when write is true. A
+// result other than success (blocked, failed) is a state: it is written when
+// it differs from the last one noticed for the claim, not on every poll, and a
+// success starts over.
 func (r *run[S, O]) audit(action, result string, write bool) {
 	cl := r.claim
 	changed, oldSum, newSum, err := r.opts.Audit.Observe(cl.GetUID(), r.spec)
 	if err != nil {
 		log.FromContext(r.ctx).Error(err, "audit: cannot fingerprint the spec")
+	}
+	if result == "success" {
+		r.opts.Audit.Clear(cl.GetUID(), noticeAuditResult)
+	} else {
+		// A spec change is always worth a line, even while the result repeats.
+		write = r.opts.Audit.Notice(cl.GetUID(), noticeAuditResult, action+"/"+result) || len(changed) > 0
 	}
 	if !write {
 		return
@@ -330,9 +347,13 @@ func (r *run[S, O]) succeeded(did string, wasSynced bool, rot rotationOutcome) (
 	case rot.grace:
 		r.set(conditions.Synced, metav1.ConditionTrue, conditions.Rotating,
 			"the previous credential generation is still valid during the grace period")
-		res.RequeueAfter = min(res.RequeueAfter, rot.retireIn)
 	default:
 		r.set(conditions.Synced, metav1.ConditionTrue, conditions.ReconcileSuccess, "in sync")
+	}
+	// Whatever the conditions say, a grace period that is running ends on time:
+	// the shortest positive requeue wins.
+	if rot.retireIn > 0 {
+		res.RequeueAfter = min(res.RequeueAfter, rot.retireIn)
 	}
 	if healthy && did == "" && !rot.rotated && !rot.finished && !wasSynced {
 		r.event(corev1.EventTypeNormal, conditions.EventObserved, "Observe", "observed the external object")

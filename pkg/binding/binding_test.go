@@ -159,16 +159,71 @@ func TestWriteSecretRefusesToTakeOver(t *testing.T) {
 	}
 }
 
-func TestWriteSecretTypeIsImmutable(t *testing.T) {
+// A Secret's type is immutable, so a controlled Secret of another type is
+// deleted and created again instead of failing on every reconcile.
+func TestWriteSecretRecreatesASecretOfAnotherType(t *testing.T) {
 	ctx := context.Background()
 	c := fake.NewClientBuilder().WithScheme(scheme(t)).Build()
 	o := owner("orders", "uid-1")
 	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypeS3, binding.DefaultProvider, nil); err != nil {
 		t.Fatal(err)
 	}
+	err := binding.WriteSecret(ctx, c, o, "s", binding.TypeRedis, binding.DefaultProvider, binding.Data{"password": []byte("p")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := getSecret(t, c, "s")
+	if got.Type != binding.SecretType(binding.TypeRedis) || string(got.Data["password"]) != "p" ||
+		string(got.Data[binding.KeyType]) != binding.TypeRedis {
+		t.Errorf("secret = type %q data %v", got.Type, got.Data)
+	}
+	if !metav1.IsControlledBy(got, o) || got.Labels[binding.LabelClaim] != "orders" {
+		t.Errorf("secret = owners %v labels %v", got.OwnerReferences, got.Labels)
+	}
+	if state, _, err := binding.Inspect(ctx, c, o, "s", binding.TypeRedis, binding.DefaultProvider); err != nil || state != binding.StateCurrent {
+		t.Errorf("Inspect = %v, %v", state, err)
+	}
+}
+
+func TestWriteSecretRecreateFailures(t *testing.T) {
+	ctx := context.Background()
+	boom := errors.New("delete boom")
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error { return boom },
+	}).Build()
+	o := owner("orders", "uid-1")
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypeS3, binding.DefaultProvider, nil); err != nil {
+		t.Fatal(err)
+	}
 	err := binding.WriteSecret(ctx, c, o, "s", binding.TypeRedis, binding.DefaultProvider, nil)
-	if err == nil || !strings.Contains(err.Error(), "immutable") {
-		t.Errorf("err = %v, want an immutable-type error", err)
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the delete error", err)
+	}
+	if getSecret(t, c, "s").Type != binding.SecretType(binding.TypeS3) {
+		t.Error("the Secret changed although it could not be deleted")
+	}
+}
+
+// A Secret that is already gone when the recreate deletes it is created anyway.
+func TestWriteSecretRecreateToleratesAConcurrentDelete(t *testing.T) {
+	ctx := context.Background()
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if err := c.Delete(ctx, obj, opts...); err != nil {
+				return err
+			}
+			return apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, obj.GetName())
+		},
+	}).Build()
+	o := owner("orders", "uid-1")
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypeS3, binding.DefaultProvider, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypeRedis, binding.DefaultProvider, nil); err != nil {
+		t.Fatal(err)
+	}
+	if getSecret(t, c, "s").Type != binding.SecretType(binding.TypeRedis) {
+		t.Error("the Secret was not recreated")
 	}
 }
 
@@ -308,7 +363,7 @@ func TestInspect(t *testing.T) {
 		}
 	}
 
-	// A Secret of another type is drift too (WriteSecret cannot fix a type).
+	// A Secret of another type is drift too (WriteSecret recreates it).
 	odd := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "odd", Namespace: "ns",
 		OwnerReferences: getSecret(t, c, "s").OwnerReferences}, Type: corev1.SecretTypeOpaque}
 	if err := c.Create(ctx, odd); err != nil {
@@ -336,5 +391,30 @@ func TestInspectReaderFailure(t *testing.T) {
 	}).Build()
 	if _, _, err := binding.Inspect(context.Background(), c, owner("o", "u"), "s", binding.TypeS3, "p"); !errors.Is(err, boom) {
 		t.Errorf("err = %v", err)
+	}
+}
+
+// The old Secret may still be Terminating when it is created again: that is a
+// retry, not a collision with someone else's Secret.
+func TestWriteSecretRecreateWhileTheOldSecretIsStillTerminating(t *testing.T) {
+	ctx := context.Background()
+	armed := false
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if armed {
+				return apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, obj.GetName())
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
+	o := owner("orders", "uid-1")
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypeS3, binding.DefaultProvider, nil); err != nil {
+		t.Fatal(err)
+	}
+	armed = true
+	err := binding.WriteSecret(ctx, c, o, "s", binding.TypeRedis, binding.DefaultProvider, nil)
+	if err == nil || errors.Is(err, binding.ErrNameCollision) || !apierrors.IsAlreadyExists(err) ||
+		!strings.Contains(err.Error(), "retrying") {
+		t.Errorf("err = %v, want a retryable error that is not ErrNameCollision", err)
 	}
 }
