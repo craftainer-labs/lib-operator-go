@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -428,4 +429,50 @@ func TestSpecChangeWhileBlockedIsAudited(t *testing.T) {
 	if n != 2 {
 		t.Errorf("audit lines = %d, want 2 (the first block and the spec change)", n)
 	}
+}
+
+// The message of a blocked deletion keeps the original cause and is stable
+// across polls: it never wraps itself.
+func TestDeletionBlockedMessageIsStableAcrossPolls(t *testing.T) {
+	for _, name := range []string{"backend error", "final resolve error"} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t, nil, widget(terminating, pinned(common.DeletionDelete, common.SourceOperatorDefault)))
+			ext := existing()
+			opts := h.dataOpts()
+			opts.Now = func() time.Time { return now.Add(2 * time.Hour) }
+			var reconcile func() (ctrl.Result, error)
+			if name == "backend error" {
+				ext.DeleteErr = errors.New("cause-text")
+				reconcile = func() (ctrl.Result, error) { return h.reconcileWidget(ext, opts) }
+			} else {
+				opts.ResolveErr = fmt.Errorf("cause-text: %w", server.ErrServerNotFound)
+				reconcile = func() (ctrl.Result, error) { return h.reconcileWidget(nil, opts) }
+			}
+			var first string
+			for i := range 4 {
+				res, err := reconcile()
+				wantResult(t, res, err, poll)
+				msg := cond(h.widget("w").Status.Conditions, synced).Message
+				if i == 0 {
+					first = msg
+				}
+				if msg != first || strings.Count(msg, "deletion has been blocked") != 1 || !strings.Contains(msg, "cause-text") {
+					t.Fatalf("poll %d: message = %q (first %q)", i, msg, first)
+				}
+			}
+		})
+	}
+}
+
+// Deliberate states are not failures: after the window they keep their own
+// reason and the poll requeue.
+func TestDeletionBlockedByInvalidPoliciesKeepsItsReasonAfterTheWindow(t *testing.T) {
+	h := newHarness(t, nil, widget(terminating, pinned(common.DeletionDelete, common.SourceOperatorDefault),
+		func(w *testWidget) { w.Spec.ManagementPolicies = policies("Create") }))
+	opts := h.dataOpts()
+	opts.Now = func() time.Time { return now.Add(2 * time.Hour) }
+	res, err := h.reconcileWidget(existing(), opts)
+	wantResult(t, res, err, poll)
+	wantCond(t, h.widget("w").Status.Conditions, synced, metav1.ConditionFalse, conditions.ManagementPolicyBlocked)
+	h.rec.AssertNoEvent(t, conditions.DeletionBlocked)
 }

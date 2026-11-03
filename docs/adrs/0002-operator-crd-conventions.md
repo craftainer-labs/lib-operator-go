@@ -431,7 +431,15 @@ non-credential keys are repeated in the Secret so a workload needs one mount.
 A Secret's `type` is immutable. When the claim's binding Secret exists with
 another type (someone edited it), the library deletes it and creates it again
 with the same keys and the right type, once, instead of reporting the drift on
-every reconcile.
+every reconcile. The new Secret is built from `data` alone, so keys of the old
+one that `data` lacks are not kept (the lifecycle repair passes the old keys in
+`data`). If the old Secret is still Terminating (a finalizer holds it), the
+create fails with AlreadyExists, which is treated as a retry on the next
+reconcile, not as `ErrNameCollision`.
+
+Known limit: the binding Secret is classified from the operator's cache, and
+only a Missing or Drifted result is confirmed through the API reader, so a
+cached "present" that has just been deleted or replaced shows up one poll late.
 
 ### 8. Two-phase credential rotation (replaces I1's `Rotate`)
 
@@ -522,6 +530,12 @@ grace period runs makes the reconcile return when the grace period ends (the
 shortest positive requeue wins); once it has ended, the previous generation is
 retired and the Secret is recreated by a rotation in the same reconcile.
 
+Known limits: if marking the Secret fails after its data was written, the next
+reconcile calls `RotateBegin` again and a second credential is issued (closing
+that window needs a `binding` write option that sets annotations, a G-api
+change); and if the Secret is repaired or recreated between a failed status
+write and the next reconcile, the adopted generation can disagree with the data.
+
 Per backend (from NR4; the live checks that belong to each operator's NOxb
 item are not repeated here):
 
@@ -582,7 +596,7 @@ Rules:
    and then strips trailing `-`, `.`, `_`, `/` and `:` so no empty segment or
    double separator results. `maxLen` counts bytes, as the backends and
    Kubernetes do, and `cut` never splits a multibyte UTF-8 character: it
-   steps back to the character's first byte. The result is never longer than `maxLen`, and
+   steps back to the character's first byte. With a tiny `maxLen` and wide characters the readable part can shrink to nothing; the hash still carries uniqueness. The result is never longer than `maxLen`, and
    there is no branch that returns `readable` unchanged.
 4. `Tenant` panics (a programmer error found by the first test run, never by
    user input) when `maxLen < hl + len(sep) + 5` (16 with `HashShort`, 22
@@ -682,7 +696,10 @@ name containing `.`).
   The in-memory tracker behind this and the spec fingerprints drops a claim on
   deletion and any claim not reconciled for 48 hours (twice the longest poll
   interval), so a claim whose finalizer was removed by hand does not stay in
-  memory.
+  memory. Known limits: the audit key of a repeated result leaves out the error
+  text, so different errors under one action and result are one line; the idle
+  sweep is O(n) once an hour under the tracker's lock; and the server-type
+  lookup of `server.Resolve` is cached for the life of the process per scheme.
 - Credentials, tokens and Secret data are never in Events, logs, conditions or
   status. The tests assert that for the binding data.
 

@@ -139,7 +139,7 @@ func (r *run[S, O]) gone(err error) error {
 // done persists the status, writes the audit line for a state change or a
 // failure, and returns the result.
 func (r *run[S, O]) done(action, result string, res ctrl.Result, err error) (ctrl.Result, error) {
-	if r.deletionWindowOver() {
+	if r.deletionWindowOver() && deletionFailed(result, err) {
 		result, res, err = r.deletionBlocked(result, err)
 	}
 	// Audit first: a status write that finds the claim gone then forgets it.

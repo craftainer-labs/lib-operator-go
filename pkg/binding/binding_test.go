@@ -393,3 +393,28 @@ func TestInspectReaderFailure(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// The old Secret may still be Terminating when it is created again: that is a
+// retry, not a collision with someone else's Secret.
+func TestWriteSecretRecreateWhileTheOldSecretIsStillTerminating(t *testing.T) {
+	ctx := context.Background()
+	armed := false
+	c := fake.NewClientBuilder().WithScheme(scheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if armed {
+				return apierrors.NewAlreadyExists(schema.GroupResource{Resource: "secrets"}, obj.GetName())
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
+	o := owner("orders", "uid-1")
+	if err := binding.WriteSecret(ctx, c, o, "s", binding.TypeS3, binding.DefaultProvider, nil); err != nil {
+		t.Fatal(err)
+	}
+	armed = true
+	err := binding.WriteSecret(ctx, c, o, "s", binding.TypeRedis, binding.DefaultProvider, nil)
+	if err == nil || errors.Is(err, binding.ErrNameCollision) || !apierrors.IsAlreadyExists(err) ||
+		!strings.Contains(err.Error(), "retrying") {
+		t.Errorf("err = %v, want a retryable error that is not ErrNameCollision", err)
+	}
+}

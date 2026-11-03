@@ -147,7 +147,9 @@ func (r *run[S, O]) deletionWindowOver() bool {
 // still completes by itself when the server or backend recovers.
 func (r *run[S, O]) deletionBlocked(result string, err error) (string, ctrl.Result, error) {
 	cause := result
-	if c := meta.FindStatusCondition(*r.claim.GetConditions(), conditions.Synced); c != nil {
+	// The condition holds the cause set just before this call, unless it is our
+	// own earlier message, which is never wrapped again.
+	if c := meta.FindStatusCondition(*r.claim.GetConditions(), conditions.Synced); c != nil && c.Reason != conditions.DeletionBlocked {
 		cause = c.Message
 	}
 	if err != nil {
@@ -162,4 +164,16 @@ func (r *run[S, O]) deletionBlocked(result string, err error) (string, ctrl.Resu
 		r.event(corev1.EventTypeWarning, conditions.DeletionBlocked, "Delete", "%s", msg)
 	}
 	return conditions.DeletionBlocked, r.requeue(), nil
+}
+
+// deletionFailed reports whether a blocked deletion's result is a failure that
+// retrying cannot fix soon: an error from the backend or the server, or a server
+// that cannot be resolved for good. Deliberate states (ManagementPolicyBlocked,
+// NameCollision) are not failures and keep their own reason.
+func deletionFailed(result string, err error) bool {
+	switch result {
+	case conditions.ServerNotFound, conditions.NamespaceNotAllowed, conditions.AdminSecretNamespaceForbidden:
+		return true
+	}
+	return err != nil
 }

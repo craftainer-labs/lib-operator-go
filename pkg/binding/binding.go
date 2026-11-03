@@ -142,6 +142,7 @@ func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 	secret := &corev1.Secret{}
 	err := reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, secret)
 	exists := err == nil
+	recreating := false
 	var annotations map[string]string
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
@@ -160,7 +161,7 @@ func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 				return fmt.Errorf("recreate secret %s/%s of type %q as %q: %w",
 					secret.Namespace, secret.Name, secret.Type, want, err)
 			}
-			exists = false
+			exists, recreating = false, true
 			annotations = secret.Annotations // keep the rotation marks
 		}
 	}
@@ -186,6 +187,12 @@ func WriteSecret(ctx context.Context, c client.Client, owner client.Object,
 	switch {
 	case !exists:
 		err := c.Create(ctx, secret)
+		if apierrors.IsAlreadyExists(err) && recreating {
+			// The old Secret is the owner's own and is still going away (a finalizer
+			// holds it): not a collision, try again on the next reconcile.
+			return fmt.Errorf("secret %s/%s of the old type is still being deleted; retrying: %w",
+				secret.Namespace, secret.Name, err)
+		}
 		if apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("%w: %s/%s", ErrNameCollision, secret.Namespace, secret.Name)
 		}
