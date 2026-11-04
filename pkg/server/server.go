@@ -274,9 +274,10 @@ func caBundle(ctx context.Context, c client.Client, ns string, b *common.CABundl
 		if err != nil {
 			return nil, err
 		}
-		pem, ok := data[b.SecretRef.Key]
+		key := b.SecretRef.KeyOrDefault()
+		pem, ok := data[key]
 		if !ok {
-			return nil, fmt.Errorf("%w: secret %q has no key %q", ErrInvalidServer, b.SecretRef.Name, b.SecretRef.Key)
+			return nil, fmt.Errorf("%w: secret %q has no key %q", ErrInvalidServer, b.SecretRef.Name, key)
 		}
 		return pem, nil
 	case b.ConfigMapRef != nil && b.SecretRef == nil:
@@ -284,13 +285,14 @@ func caBundle(ctx context.Context, c client.Client, ns string, b *common.CABundl
 		if err := c.Get(ctx, types.NamespacedName{Namespace: ns, Name: b.ConfigMapRef.Name}, &cm); err != nil {
 			return nil, fmt.Errorf("get configmap %s/%s: %w", ns, b.ConfigMapRef.Name, err)
 		}
-		if v, ok := cm.Data[b.ConfigMapRef.Key]; ok {
+		key := b.ConfigMapRef.KeyOrDefault()
+		if v, ok := cm.Data[key]; ok {
 			return []byte(v), nil
 		}
-		if v, ok := cm.BinaryData[b.ConfigMapRef.Key]; ok {
+		if v, ok := cm.BinaryData[key]; ok {
 			return append([]byte(nil), v...), nil
 		}
-		return nil, fmt.Errorf("%w: configmap %q has no key %q", ErrInvalidServer, b.ConfigMapRef.Name, b.ConfigMapRef.Key)
+		return nil, fmt.Errorf("%w: configmap %q has no key %q", ErrInvalidServer, b.ConfigMapRef.Name, key)
 	default:
 		return nil, fmt.Errorf("%w: caBundle needs exactly one of secretRef and configMapRef", ErrInvalidServer)
 	}

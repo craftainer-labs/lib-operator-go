@@ -125,6 +125,8 @@ func TestServerCommonSchemaAndCEL(t *testing.T) {
 		{"a namespaced server has no allowedNamespaces", nil, ""},
 		{"CA from a Secret", obj{"tls": obj{"caBundle": obj{"secretRef": ref}}}, ""},
 		{"CA from a ConfigMap", obj{"tls": obj{"caBundle": obj{"configMapRef": ref}}}, ""},
+		{"CA key may be omitted (defaults to ca.crt)", obj{"tls": obj{"caBundle": obj{"secretRef": obj{"name": "ca"}}}}, ""},
+		{"CA key must not be empty", obj{"tls": obj{"caBundle": obj{"secretRef": obj{"name": "ca", "key": ""}}}}, "should be at least 1 chars long"},
 		{"CA from both", obj{"tls": obj{"caBundle": obj{"secretRef": ref, "configMapRef": ref}}}, "exactly one of secretRef and configMapRef"},
 		{"CA from neither", obj{"tls": obj{"caBundle": obj{}}}, "exactly one of secretRef and configMapRef"},
 		{"TLS 1.3", obj{"tls": obj{"minVersion": "1.3"}}, ""},

@@ -26,8 +26,8 @@ Cluster servers (`Cluster<Kind>Server`) and namespaced servers
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
-| `tls.caBundle.secretRef` | `{name, key}` | no | system roots | name and key maxLength 253; exactly one of `secretRef` and `configMapRef` |
-| `tls.caBundle.configMapRef` | `{name, key}` | no | none | as above |
+| `tls.caBundle.secretRef` | `{name, key?}` | no | system roots | name and key maxLength 253; `key` defaults to `ca.crt`; exactly one of `secretRef` and `configMapRef` |
+| `tls.caBundle.configMapRef` | `{name, key?}` | no | none | as above |
 | `tls.serverName` | string | no | host of the endpoint | maxLength 253 |
 | `tls.minVersion` | enum | no | `"1.2"` | `"1.2"`, `"1.3"` |
 | `adminCredentialsSecretRef` | `{name, key?, namespace?}` | yes | | `name` maxLength 253. Cluster server: `namespace` required, and the controller refuses any namespace but the operator's. Namespaced server: `namespace` forbidden (CEL), the Secret is in the server's namespace |

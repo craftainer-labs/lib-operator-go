@@ -116,7 +116,7 @@ We will follow the conventions below in every operator and in
 ### 2. Server tiers and `allowedNamespaces`
 
 - `Cluster<Kind>Server` (cluster scoped) holds the endpoint, the TLS settings
-  (`tls.caBundle` from a Secret or ConfigMap key; TLS 1.2 minimum; there is no
+  (`tls.caBundle` from a Secret or ConfigMap key, `key` defaulting to `ca.crt`; TLS 1.2 minimum; there is no
   `insecureSkipVerify` field, EB-14), `adminCredentialsSecretRef` and
   `allowedNamespaces`. `<Kind>Server` (namespaced) has the same fields except
   `allowedNamespaces`, and its Secret reference names a Secret in its own
