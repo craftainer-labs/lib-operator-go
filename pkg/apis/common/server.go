@@ -121,16 +121,31 @@ const (
 	TLS13 TLSVersion = "1.3"
 )
 
-// KeyReference names a key of a Secret or ConfigMap.
+// DefaultCAKey is the key of a CA bundle reference when the key is unset.
+const DefaultCAKey = "ca.crt"
+
+// KeyReference names a key of a Secret or ConfigMap holding a CA bundle. It is
+// used only by CABundle; credentials references keep their own required key.
 type KeyReference struct {
 	// Name of the Secret or ConfigMap.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
-	// Key inside it.
+	// Key inside it. Defaults to ca.crt.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
-	Key string `json:"key"`
+	// +kubebuilder:default=ca.crt
+	// +optional
+	Key string `json:"key,omitempty"`
+}
+
+// KeyOrDefault returns Key, or DefaultCAKey when it is empty (an object
+// written before the API server applied the default).
+func (r KeyReference) KeyOrDefault() string {
+	if r.Key == "" {
+		return DefaultCAKey
+	}
+	return r.Key
 }
 
 // CABundle points at the trust anchors of a server. Exactly one reference.

@@ -123,6 +123,19 @@ func TestServerStatusDeepCopyCopiesTheProbeTime(t *testing.T) {
 	}
 }
 
+func TestKeyReferenceKeyOrDefault(t *testing.T) {
+	for _, tt := range []struct{ name, key, want string }{
+		{"unset defaults to ca.crt", "", "ca.crt"},
+		{"explicit key wins", "root.pem", "root.pem"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := (common.KeyReference{Name: "ca", Key: tt.key}).KeyOrDefault(); got != tt.want {
+				t.Errorf("KeyOrDefault() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDeepCopy(t *testing.T) {
 	testenv.VerifyDeepCopy(t,
 		&common.ServerRef{}, &common.ClaimCommon{}, &common.DataClaim{}, &common.BindingSpec{},
