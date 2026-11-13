@@ -407,7 +407,9 @@ func TestOperatorNamespace(t *testing.T) {
 // noScope is a client that cannot tell whether a kind is namespaced.
 type noScope struct{ client.Client }
 
-func (noScope) IsObjectNamespaced(runtime.Object) (bool, error) { return false, errors.New("no mapping") }
+func (noScope) IsObjectNamespaced(runtime.Object) (bool, error) {
+	return false, errors.New("no mapping")
+}
 
 func TestUnknownScope(t *testing.T) {
 	c := newClient(t, interceptor.Funcs{}, teamServer(nil), admin("team-a"))
