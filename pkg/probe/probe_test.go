@@ -3,6 +3,7 @@ package probe_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
 	"github.com/craftainer-labs/lib-operator-go/pkg/conditions"
@@ -81,17 +83,17 @@ func newClient(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) cli
 
 // counting returns interceptor funcs that count status writes.
 func counting(n *int) interceptor.Funcs {
-	return interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, sub string,
-		obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	return interceptor.Funcs{SubResourcePatch: func(ctx context.Context, c client.Client, sub string,
+		obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 		*n++
-		return c.SubResource(sub).Update(ctx, obj, opts...)
+		return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 	}}
 }
 
 // failing returns interceptor funcs whose status writes fail with err.
 func failing(err error) interceptor.Funcs {
-	return interceptor.Funcs{SubResourceUpdate: func(context.Context, client.Client, string,
-		client.Object, ...client.SubResourceUpdateOption) error {
+	return interceptor.Funcs{SubResourcePatch: func(context.Context, client.Client, string,
+		client.Object, client.Patch, ...client.SubResourcePatchOption) error {
 		return err
 	}}
 }
@@ -144,8 +146,27 @@ func getTeam(t *testing.T, c client.Client) *testapi.WidgetServer {
 	return &s
 }
 
-func opts(clk *clock) probe.Options {
-	return probe.Options{OperatorNamespace: opNS, Now: clk.now, Jitter: func() float64 { return 0.5 }}
+// setup is the options of a test and its clock.
+type setup struct {
+	probe.Options
+	clk *clock
+}
+
+func opts(clk *clock) setup {
+	return setup{Options: probe.Options{OperatorNamespace: opNS}, clk: clk}
+}
+
+// reconciler returns a Reconciler of the namespaced test kind with a fixed
+// clock and a jitter of 0.5.
+func reconciler(c client.Client, p probe.Prober, s setup) *probe.Reconciler {
+	r := &probe.Reconciler{Client: c, New: func() probe.Server { return &testapi.WidgetServer{} }, Prober: p, Options: s.Options}
+	r.SetClock(s.clk.now, func() float64 { return 0.5 })
+	return r
+}
+
+// run probes srv once.
+func run(ctx context.Context, c client.Client, srv probe.Server, p probe.Prober, s setup) (ctrl.Result, error) {
+	return reconciler(c, p, s).ProbeServer(ctx, srv)
 }
 
 func cond(t *testing.T, st common.ServerStatus, typ string, status metav1.ConditionStatus, reason string) *metav1.Condition {
@@ -161,7 +182,7 @@ func TestReconcileRecordsAServerThatAnswers(t *testing.T) {
 	c := newClient(t, interceptor.Funcs{}, teamServer(nil), admin("team-a"))
 	clk := &clock{t0}
 	p := &stub{version: "16.2"}
-	res, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk))
+	res, err := run(context.Background(), c, getTeam(t, c), p, opts(clk))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,13 +224,13 @@ func TestReconcileClusterServerAndIntervals(t *testing.T) {
 			c := newClient(t, interceptor.Funcs{}, sharedServer(tt.mut), admin(opNS))
 			o := opts(&clock{t0})
 			if tt.opt != nil {
-				tt.opt(&o)
+				tt.opt(&o.Options)
 			}
 			var s testapi.ClusterWidgetServer
 			if err := c.Get(context.Background(), sharedKey, &s); err != nil {
 				t.Fatal(err)
 			}
-			res, err := probe.Reconcile(context.Background(), c, &s, &stub{}, o)
+			res, err := run(context.Background(), c, &s, &stub{}, o)
 			if err != nil || res.RequeueAfter != tt.want {
 				t.Fatalf("res = %+v, err = %v, want %v", res, err, tt.want)
 			}
@@ -228,7 +249,7 @@ func TestStatusIsWrittenOnlyOnChange(t *testing.T) {
 	p := &stub{version: "16.2"}
 	run := func() {
 		t.Helper()
-		if _, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
+		if _, err := run(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -255,12 +276,12 @@ func TestGenerationChangeIsRecorded(t *testing.T) {
 	c := newClient(t, counting(&writes), teamServer(nil), admin("team-a"))
 	clk := &clock{t0}
 	p := &stub{}
-	if _, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
+	if _, err := run(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
 		t.Fatal(err)
 	}
 	s := getTeam(t, c)
 	s.Generation = 2 // a spec change
-	if _, err := probe.Reconcile(context.Background(), c, s, p, opts(clk)); err != nil {
+	if _, err := run(context.Background(), c, s, p, opts(clk)); err != nil {
 		t.Fatal(err)
 	}
 	st := getTeam(t, c).Status
@@ -277,13 +298,13 @@ func TestProbeFailure(t *testing.T) {
 	c := newClient(t, counting(&writes), teamServer(nil), admin("team-a"))
 	clk := &clock{t0}
 	p := &stub{version: "16.2"}
-	if _, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
+	if _, err := run(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
 		t.Fatal(err)
 	}
 	boom := errors.New("dial tcp 10.0.0.7:5432: password authentication failed for root")
 	p.err = boom
-	res, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk))
-	if !errors.Is(err, boom) || res != (ctrl.Result{}) { // an error, so controller-runtime backs off
+	res, err := run(context.Background(), c, getTeam(t, c), p, opts(clk))
+	if err != nil || res.RequeueAfter != time.Minute+3*time.Second { // not an error: the interval, not backoff, paces a failing server
 		t.Fatalf("res = %+v, err = %v", res, err)
 	}
 	st := getTeam(t, c).Status
@@ -298,15 +319,15 @@ func TestProbeFailure(t *testing.T) {
 		t.Errorf("the last known version was dropped: %q", st.ServerVersion)
 	}
 	before := writes
-	if _, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk)); !errors.Is(err, boom) {
-		t.Fatal(err)
+	if res, err := run(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil || res.RequeueAfter == 0 {
+		t.Fatalf("res = %+v, err = %v", res, err)
 	}
 	if writes != before {
 		t.Error("a repeated failure wrote the status again")
 	}
 	// Recovery flips both conditions back.
 	p.err = nil
-	if _, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
+	if _, err := run(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
 		t.Fatal(err)
 	}
 	cond(t, getTeam(t, c).Status, conditions.Ready, metav1.ConditionTrue, conditions.Available)
@@ -326,7 +347,7 @@ func TestVersionFitsTheSchema(t *testing.T) {
 			clk := &clock{t0}
 			p := &stub{version: tt.in}
 			for range 2 {
-				if _, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
+				if _, err := run(context.Background(), c, getTeam(t, c), p, opts(clk)); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -352,7 +373,7 @@ func TestForbiddenAdminSecretNamespace(t *testing.T) {
 		if err := c.Get(context.Background(), sharedKey, &s); err != nil {
 			t.Fatal(err)
 		}
-		res, err := probe.Reconcile(context.Background(), c, &s, p, opts(clk))
+		res, err := run(context.Background(), c, &s, p, opts(clk))
 		if err != nil || res.RequeueAfter != time.Minute+3*time.Second { // not an error: backoff cannot fix it
 			t.Fatalf("res = %+v, err = %v", res, err)
 		}
@@ -371,9 +392,13 @@ func TestForbiddenAdminSecretNamespace(t *testing.T) {
 func TestUnreadableConnectionSettings(t *testing.T) {
 	c := newClient(t, interceptor.Funcs{}, teamServer(nil)) // the admin Secret is missing
 	p := &stub{}
-	res, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(&clock{t0}))
-	if err == nil || res != (ctrl.Result{}) || p.calls != 0 {
-		t.Fatalf("res = %+v, err = %v, calls = %d", res, err, p.calls)
+	var res ctrl.Result
+	var err error
+	for range 2 { // the second pass logs at V(1) and writes nothing
+		res, err = run(context.Background(), c, getTeam(t, c), p, opts(&clock{t0}))
+		if err != nil || res.RequeueAfter != time.Minute+3*time.Second || p.calls != 0 { // requeued at the interval, not backed off
+			t.Fatalf("res = %+v, err = %v, calls = %d", res, err, p.calls)
+		}
 	}
 	st := getTeam(t, c).Status
 	cond(t, st, conditions.ServerReachable, metav1.ConditionUnknown, conditions.InvalidServer)
@@ -395,13 +420,129 @@ func TestOperatorNamespace(t *testing.T) {
 		return &s
 	}
 	t.Setenv(server.OperatorNamespaceEnv, "")
-	if _, err := probe.Reconcile(context.Background(), c, get(), &stub{}, o); !errors.Is(err, server.ErrOperatorNamespaceUnset) {
-		t.Errorf("unset: err = %v", err)
+	p := &stub{}
+	if _, err := run(context.Background(), c, get(), p, o); err != nil || p.calls != 0 {
+		t.Errorf("unset: err = %v, calls = %d", err, p.calls)
 	}
+	cond(t, get().Status, conditions.Ready, metav1.ConditionFalse, conditions.InvalidServer)
 	t.Setenv(server.OperatorNamespaceEnv, opNS)
-	if _, err := probe.Reconcile(context.Background(), c, get(), &stub{}, o); err != nil {
-		t.Errorf("from the environment: err = %v", err)
+	if _, err := run(context.Background(), c, get(), p, o); err != nil || p.calls != 1 {
+		t.Errorf("from the environment: err = %v, calls = %d", err, p.calls)
 	}
+	cond(t, get().Status, conditions.Ready, metav1.ConditionTrue, conditions.Available)
+}
+
+func TestShutdownRecordsNothing(t *testing.T) {
+	var writes int
+	c := newClient(t, counting(&writes), teamServer(nil), admin("team-a"))
+	ctx, cancel := context.WithCancel(context.Background())
+	p := probe.ProberFunc(func(ctx context.Context, _ server.Server, _ server.Connection) (string, error) {
+		cancel() // the manager stops mid-probe
+		return "", ctx.Err()
+	})
+	res, err := run(ctx, c, getTeam(t, c), p, opts(&clock{t0}))
+	if err != nil || res != (ctrl.Result{}) || writes != 0 || len(getTeam(t, c).Status.Conditions) != 0 {
+		t.Errorf("res = %+v, err = %v, writes = %d", res, err, writes)
+	}
+}
+
+func TestDependents(t *testing.T) {
+	withCA := func(s *testapi.WidgetServer) {
+		s.Spec.TLS = &common.TLS{CABundle: &common.CABundle{SecretRef: &common.KeyReference{Name: "ca-secret"}}}
+	}
+	withMap := func(s *testapi.WidgetServer) {
+		s.Spec.TLS = &common.TLS{CABundle: &common.CABundle{ConfigMapRef: &common.KeyReference{Name: "ca-map"}}}
+	}
+	other := teamServer(func(s *testapi.WidgetServer) {
+		s.Name, s.Namespace = "other", "team-b"
+		s.Spec.AdminCredentialsSecretRef.Name = "other-admin"
+	})
+	cluster := sharedServer(func(s *testapi.ClusterWidgetServer) {
+		s.Spec.TLS = &common.TLS{CABundle: &common.CABundle{SecretRef: &common.KeyReference{Name: "ca-secret"}}}
+	})
+	newR := func(objs ...client.Object) *probe.Reconciler {
+		return reconciler(newClient(t, interceptor.Funcs{}, objs...), &stub{}, opts(&clock{t0}))
+	}
+	obj := func(o client.Object, ns, name string) client.Object {
+		o.SetNamespace(ns)
+		o.SetName(name)
+		return o
+	}
+	names := func(reqs []reconcile.Request) []string {
+		var out []string
+		for _, r := range reqs {
+			out = append(out, r.String())
+		}
+		return out
+	}
+	tests := []struct {
+		name string
+		objs []client.Object
+		obj  client.Object
+		want []string
+	}{
+		{"admin Secret of a namespaced server", []client.Object{teamServer(nil), other}, obj(&corev1.Secret{}, "team-a", "admin"), []string{"team-a/team"}},
+		{"the same name in another namespace", []client.Object{teamServer(nil), other}, obj(&corev1.Secret{}, "team-c", "admin"), nil},
+		{"an unrelated Secret", []client.Object{teamServer(nil)}, obj(&corev1.Secret{}, "team-a", "unrelated"), nil},
+		{"CA Secret", []client.Object{teamServer(withCA)}, obj(&corev1.Secret{}, "team-a", "ca-secret"), []string{"team-a/team"}},
+		{"CA ConfigMap", []client.Object{teamServer(withMap)}, obj(&corev1.ConfigMap{}, "team-a", "ca-map"), []string{"team-a/team"}},
+		{"a ConfigMap named like the admin Secret", []client.Object{teamServer(nil)}, obj(&corev1.ConfigMap{}, "team-a", "admin"), nil},
+		{"a server without TLS and a ConfigMap", []client.Object{teamServer(nil)}, obj(&corev1.ConfigMap{}, "team-a", "ca-map"), nil},
+		{"a CA Secret ref and a ConfigMap", []client.Object{teamServer(withCA)}, obj(&corev1.ConfigMap{}, "team-a", "ca-secret"), nil},
+		{"a CA ConfigMap ref and a Secret", []client.Object{teamServer(withMap)}, obj(&corev1.Secret{}, "team-a", "ca-map"), nil},
+		{"a TLS block without a bundle", []client.Object{teamServer(func(s *testapi.WidgetServer) { s.Spec.TLS = &common.TLS{} })}, obj(&corev1.Secret{}, "team-a", "ca-secret"), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := newR(tt.objs...).Dependents(context.Background(), tt.obj)
+			if err != nil || !slices.Equal(names(got), tt.want) {
+				t.Errorf("got %v, err = %v, want %v", names(got), err, tt.want)
+			}
+		})
+	}
+
+	t.Run("a cluster server matches by the namespace of its admin reference", func(t *testing.T) {
+		r := reconciler(newClient(t, interceptor.Funcs{}, cluster), &stub{}, opts(&clock{t0}))
+		r.New = func() probe.Server { return &testapi.ClusterWidgetServer{} }
+		for _, o := range []client.Object{obj(&corev1.Secret{}, opNS, "admin"), obj(&corev1.Secret{}, "elsewhere", "ca-secret")} {
+			got, err := r.Dependents(context.Background(), o)
+			if err != nil || !slices.Equal(names(got), []string{"/shared"}) {
+				t.Errorf("%s: got %v, err = %v", o.GetName(), names(got), err)
+			}
+		}
+		if got, _ := r.Dependents(context.Background(), obj(&corev1.Secret{}, "tenant", "admin")); got != nil {
+			t.Errorf("a Secret outside the namespace of the admin reference matched: %v", got)
+		}
+	})
+	t.Run("a failed list maps to nothing", func(t *testing.T) {
+		c := newClient(t, interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+			return errors.New("cache is not synced")
+		}}, teamServer(nil))
+		got, err := reconciler(c, &stub{}, opts(&clock{t0})).Dependents(context.Background(), obj(&corev1.Secret{}, "team-a", "admin"))
+		if err != nil || got != nil {
+			t.Errorf("got %v, err = %v", got, err)
+		}
+	})
+	t.Run("a kind the scheme cannot list", func(t *testing.T) {
+		s := runtime.NewScheme()
+		if err := probe.ListFor(s, &testapi.WidgetServer{}); err == nil {
+			t.Error("a kind outside the scheme was accepted")
+		}
+		s.AddKnownTypes(testapi.GroupVersion, &testapi.WidgetServer{})
+		if err := probe.ListFor(s, &testapi.WidgetServer{}); err == nil {
+			t.Error("a kind without a list type was accepted")
+		}
+		if err := probe.ListFor(scheme(t), &testapi.WidgetServer{}); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Run("Dependents reports a scheme without the list type", func(t *testing.T) {
+		s := runtime.NewScheme()
+		c := fake.NewClientBuilder().WithScheme(s).Build()
+		if _, err := reconciler(c, &stub{}, opts(&clock{t0})).Dependents(context.Background(), &corev1.Secret{}); err == nil {
+			t.Error("no error")
+		}
+	})
 }
 
 func TestTransientReadFailureLeavesTheStatusAlone(t *testing.T) {
@@ -415,7 +556,7 @@ func TestTransientReadFailureLeavesTheStatusAlone(t *testing.T) {
 	}
 	c := newClient(t, f, teamServer(nil), admin("team-a"))
 	p := &stub{}
-	res, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(&clock{t0}))
+	res, err := run(context.Background(), c, getTeam(t, c), p, opts(&clock{t0}))
 	if err == nil || res != (ctrl.Result{}) || p.calls != 0 || writes != 0 {
 		t.Errorf("res = %+v, err = %v, calls = %d, writes = %d", res, err, p.calls, writes)
 	}
@@ -434,7 +575,7 @@ func (noScope) IsObjectNamespaced(runtime.Object) (bool, error) {
 func TestUnknownScope(t *testing.T) {
 	c := newClient(t, interceptor.Funcs{}, teamServer(nil), admin("team-a"))
 	p := &stub{}
-	if _, err := probe.Reconcile(context.Background(), noScope{c}, getTeam(t, c), p, opts(&clock{t0})); err == nil || p.calls != 0 {
+	if _, err := run(context.Background(), noScope{c}, getTeam(t, c), p, opts(&clock{t0})); err == nil || p.calls != 0 {
 		t.Errorf("err = %v, calls = %d", err, p.calls)
 	}
 }
@@ -447,7 +588,7 @@ func TestDeletingServerIsLeftAlone(t *testing.T) {
 	var writes int
 	c := newClient(t, counting(&writes), srv, admin("team-a"))
 	p := &stub{}
-	res, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(&clock{t0}))
+	res, err := run(context.Background(), c, getTeam(t, c), p, opts(&clock{t0}))
 	if err != nil || res != (ctrl.Result{}) || p.calls != 0 || writes != 0 {
 		t.Errorf("res = %+v, err = %v, calls = %d, writes = %d", res, err, p.calls, writes)
 	}
@@ -463,13 +604,13 @@ func TestStatusWriteFailures(t *testing.T) {
 		wantAll []error // every one must be in the returned error
 	}{
 		{"success", []client.Object{admin("team-a")}, &stub{}, []error{broken}},
-		{"probe failure", []client.Object{admin("team-a")}, &stub{err: boom}, []error{broken, boom}},
+		{"probe failure", []client.Object{admin("team-a")}, &stub{err: boom}, []error{broken}},
 		{"unreadable settings", nil, &stub{}, []error{broken}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newClient(t, failing(broken), append([]client.Object{teamServer(nil)}, tt.objs...)...)
-			_, err := probe.Reconcile(context.Background(), c, getTeam(t, c), tt.prober, opts(&clock{t0}))
+			_, err := run(context.Background(), c, getTeam(t, c), tt.prober, opts(&clock{t0}))
 			for _, want := range tt.wantAll {
 				if !errors.Is(err, want) {
 					t.Errorf("err = %v, want %v in it", err, want)
@@ -484,14 +625,14 @@ func TestStatusWriteFailures(t *testing.T) {
 		if err := c.Get(context.Background(), sharedKey, &s); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := probe.Reconcile(context.Background(), c, &s, &stub{}, opts(&clock{t0})); !errors.Is(err, broken) {
+		if _, err := run(context.Background(), c, &s, &stub{}, opts(&clock{t0})); !errors.Is(err, broken) {
 			t.Errorf("err = %v", err)
 		}
 	})
 	t.Run("server gone", func(t *testing.T) {
 		c := newClient(t, failing(apierrors.NewNotFound(schema.GroupResource{Resource: "widgetservers"}, "team")),
 			teamServer(nil), admin("team-a"))
-		if _, err := probe.Reconcile(context.Background(), c, getTeam(t, c), &stub{}, opts(&clock{t0})); err != nil {
+		if _, err := run(context.Background(), c, getTeam(t, c), &stub{}, opts(&clock{t0})); err != nil {
 			t.Errorf("err = %v", err)
 		}
 	})
@@ -512,9 +653,7 @@ func TestProberFunc(t *testing.T) {
 func TestReconciler(t *testing.T) {
 	c := newClient(t, interceptor.Funcs{}, teamServer(nil), admin("team-a"))
 	p := &stub{version: "1"}
-	r := &probe.Reconciler{
-		Client: c, New: func() probe.Server { return &testapi.WidgetServer{} }, Prober: p, Options: opts(&clock{t0}),
-	}
+	r := reconciler(c, p, opts(&clock{t0}))
 	if res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "gone"}}); err != nil || res != (ctrl.Result{}) || p.calls != 0 {
 		t.Errorf("a missing server: res = %+v, err = %v, calls = %d", res, err, p.calls)
 	}

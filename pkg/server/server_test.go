@@ -426,3 +426,58 @@ func TestResolveErrors(t *testing.T) {
 		}
 	})
 }
+
+func TestConnectionFor(t *testing.T) {
+	ctx := context.Background()
+	t.Setenv(server.OperatorNamespaceEnv, "")
+
+	t.Run("namespaced server, the caller's default interval", func(t *testing.T) {
+		c := newClient(t, nil, namespacedServer(nil), adminSecret("team-a"))
+		conn, err := server.ConnectionFor(ctx, c, namespacedServer(nil), server.WithHealthCheckInterval(2*time.Minute))
+		if err != nil || conn.Endpoint != "https://team.example" || conn.HealthCheckInterval != 2*time.Minute {
+			t.Errorf("conn = %+v, err = %v", conn, err)
+		}
+	})
+	t.Run("the default default and the bounds of the server's own value", func(t *testing.T) {
+		c := newClient(t, nil, adminSecret("team-a"))
+		conn, err := server.ConnectionFor(ctx, c, namespacedServer(nil), server.WithHealthCheckInterval(0))
+		if err != nil || conn.HealthCheckInterval != time.Minute {
+			t.Errorf("default: %v, %v", conn.HealthCheckInterval, err)
+		}
+		own := namespacedServer(func(s *testapi.WidgetServer) {
+			s.Spec.HealthCheckInterval = &metav1.Duration{Duration: time.Second}
+		})
+		conn, err = server.ConnectionFor(ctx, c, own, server.WithHealthCheckInterval(2*time.Minute))
+		if err != nil || conn.HealthCheckInterval != 10*time.Second {
+			t.Errorf("own value: %v, %v", conn.HealthCheckInterval, err)
+		}
+	})
+	t.Run("cluster server reads the operator namespace", func(t *testing.T) {
+		c := newClient(t, nil, adminSecret(opNS))
+		conn, err := server.ConnectionFor(ctx, c, clusterServer(nil), server.WithOperatorNamespace(opNS))
+		if err != nil || string(conn.Admin["password"]) != "pw" {
+			t.Errorf("conn = %+v, err = %v", conn, err)
+		}
+	})
+	t.Run("an error still carries the interval", func(t *testing.T) {
+		c := newClient(t, nil, adminSecret(opNS))
+		conn, err := server.ConnectionFor(ctx, c, clusterServer(nil), server.WithHealthCheckInterval(3*time.Minute))
+		if !errors.Is(err, server.ErrOperatorNamespaceUnset) || conn.Endpoint != "" || conn.HealthCheckInterval != 3*time.Minute {
+			t.Errorf("conn = %+v, err = %v", conn, err)
+		}
+	})
+	t.Run("a namespaced server without a namespace", func(t *testing.T) {
+		c := newClient(t, nil, adminSecret(""))
+		srv := namespacedServer(func(s *testapi.WidgetServer) { s.Namespace = "" })
+		if _, err := server.ConnectionFor(ctx, c, srv); !errors.Is(err, server.ErrInvalidServer) {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("a forbidden admin Secret namespace", func(t *testing.T) {
+		c := newClient(t, nil, adminSecret(opNS), adminSecret("tenant"))
+		srv := clusterServer(func(s *testapi.ClusterWidgetServer) { s.Spec.AdminCredentialsSecretRef.Namespace = "tenant" })
+		if _, err := server.ConnectionFor(ctx, c, srv, server.WithOperatorNamespace(opNS)); !errors.Is(err, server.ErrAdminSecretNamespaceForbidden) {
+			t.Errorf("err = %v", err)
+		}
+	})
+}

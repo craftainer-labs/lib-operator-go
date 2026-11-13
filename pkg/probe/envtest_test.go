@@ -16,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/craftainer-labs/lib-operator-go/pkg/apis/common"
@@ -178,4 +179,68 @@ func TestControllersAgainstAnAPIServer(t *testing.T) {
 		return got.Generation > 1 && got.Status.ObservedGeneration == got.Generation &&
 			c != nil && c.Status == metav1.ConditionTrue && c.ObservedGeneration == got.Generation
 	})
+}
+
+// A server whose admin Secret is missing is InvalidServer, and creating the
+// Secret probes it at once: the interval here is an hour, so only the watch on
+// the Secret can explain a quick recovery.
+func TestSecretWatchProbesAtOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ns := env.Namespace(t, nil)
+	team := &testapi.WidgetServer{ObjectMeta: metav1.ObjectMeta{Name: "late", Namespace: ns}}
+	team.Spec.Endpoint = "https://late.example"
+	team.Spec.AdminCredentialsSecretRef = common.AdminSecretRef{Name: "admin"}
+	if err := env.Client.Create(ctx, team); err != nil {
+		t.Fatal(err)
+	}
+
+	skip := true
+	mgr, err := ctrl.NewManager(env.Config, ctrl.Options{
+		Scheme:     env.Scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Controller: config.Controller{SkipNameValidation: &skip},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &probe.Reconciler{
+		Client: mgr.GetClient(),
+		New:    func() probe.Server { return &testapi.WidgetServer{} },
+		Prober: probe.ProberFunc(func(context.Context, server.Server, server.Connection) (string, error) {
+			return "1.0", nil
+		}),
+		Options:    probe.Options{DefaultInterval: time.Hour},
+		Controller: controller.Options{MaxConcurrentReconciles: 2},
+	}
+	if err := r.SetupWithManager(mgr); err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- mgr.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-stopped; err != nil {
+			t.Errorf("manager: %v", err)
+		}
+	})
+
+	ready := func(want metav1.ConditionStatus, reason string) func() bool {
+		return func() bool {
+			var got testapi.WidgetServer
+			if err := env.Client.Get(ctx, client.ObjectKeyFromObject(team), &got); err != nil {
+				t.Fatal(err)
+			}
+			c := meta.FindStatusCondition(got.Status.Conditions, conditions.Ready)
+			return c != nil && c.Status == want && c.Reason == reason
+		}
+	}
+	eventually(t, "the missing Secret to be recorded", ready(metav1.ConditionFalse, conditions.InvalidServer))
+	s := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "admin"},
+		Data:       map[string][]byte{"username": []byte("root")},
+	}
+	if err := env.Client.Create(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the new Secret to probe the server", ready(metav1.ConditionTrue, conditions.Available))
 }
