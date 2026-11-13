@@ -244,3 +244,19 @@ func TestSecretWatchProbesAtOnce(t *testing.T) {
 	}
 	eventually(t, "the new Secret to probe the server", ready(metav1.ConditionTrue, conditions.Available))
 }
+
+// A scheme without the kind's list type is an error of SetupWithManager, not a
+// panic or a controller that never sees a server.
+func TestSetupWithManagerNeedsTheKindInTheScheme(t *testing.T) {
+	mgr, err := ctrl.NewManager(env.Config, ctrl.Options{
+		Scheme:  runtime.NewScheme(),
+		Metrics: metricsserver.Options{BindAddress: "0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &probe.Reconciler{Client: mgr.GetClient(), New: func() probe.Server { return &testapi.WidgetServer{} }}
+	if err := r.SetupWithManager(mgr); err == nil {
+		t.Error("a kind outside the scheme was accepted")
+	}
+}

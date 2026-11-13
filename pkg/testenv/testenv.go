@@ -37,6 +37,7 @@ const (
 // runSetupEnvtest returns the directory of the envtest binaries. It is a
 // variable so a test can replace it.
 var runSetupEnvtest = func(ctx context.Context) (string, error) {
+	defer lockSetup()()
 	cmd := exec.CommandContext(ctx, "go", "run",
 		"sigs.k8s.io/controller-runtime/tools/setup-envtest@"+SetupEnvtestVersion,
 		"use", KubernetesVersion, "-p", "path")
