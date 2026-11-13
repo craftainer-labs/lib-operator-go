@@ -8,6 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -39,3 +40,6 @@ func ListFor(s *runtime.Scheme, obj Server) error {
 	_, err := listFor(s, obj)
 	return err
 }
+
+// PredicatesForTest returns the event filter of the server watch.
+func PredicatesForTest() predicate.Predicate { return predicates() }

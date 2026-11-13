@@ -673,7 +673,7 @@ func TestReconciler(t *testing.T) {
 }
 
 func TestPredicates(t *testing.T) {
-	p := probe.Predicates()
+	p := probe.PredicatesForTest()
 	old := teamServer(nil)
 	statusOnly := old.DeepCopy()
 	statusOnly.Status.ServerVersion = "16.2"

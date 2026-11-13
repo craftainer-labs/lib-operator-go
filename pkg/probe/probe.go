@@ -310,14 +310,14 @@ func save(ctx context.Context, c client.Client, srv Server, base client.Object, 
 	return nil
 }
 
-// Predicates is the event filter of the server watch: creation and a spec
+// predicates is the event filter of the server watch: creation and a spec
 // change (metadata.generation) trigger a probe; the helper's own status writes
 // do not. SetupWithManager applies it to the server only, never to the Secrets
 // and ConfigMaps it also watches.
-func Predicates() predicate.Predicate { return predicate.GenerationChangedPredicate{} }
+func predicates() predicate.Predicate { return predicate.GenerationChangedPredicate{} }
 
 // SetupWithManager registers the reconciler as the controller of the kind New
-// returns. It watches the servers (filtered by Predicates) and the Secrets and
+// returns. It watches the servers (filtered by a generation predicate) and the Secrets and
 // ConfigMaps they name (the admin Secret, the CA bundle), so creating or
 // fixing one probes the servers that use it at once. The operator needs get,
 // list and watch on Secrets and ConfigMaps (its cached client does already)
@@ -335,7 +335,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		})
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(r.New(), builder.WithPredicates(Predicates())).
+		For(r.New(), builder.WithPredicates(predicates())).
 		Watches(&corev1.Secret{}, mapper(usesSecret)).
 		Watches(&corev1.ConfigMap{}, mapper(usesConfigMap)).
 		WithOptions(r.Controller).
