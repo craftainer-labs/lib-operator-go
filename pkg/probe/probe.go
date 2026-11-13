@@ -220,7 +220,7 @@ func (r *Reconciler) probeServer(ctx context.Context, srv Server) (ctrl.Result, 
 	pctx, cancel := context.WithTimeout(ctx, o.Timeout)
 	defer cancel()
 	version, perr := r.Prober.Probe(pctx, srv, conn)
-	if perr != nil && ctx.Err() != nil { // the manager is stopping: the probe was cut short, not failed
+	if ctx.Err() != nil { // the manager is stopping: a probe cut short is not a failure, and the write would fail
 		return ctrl.Result{}, nil
 	}
 	changed := observe(st, gen)

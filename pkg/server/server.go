@@ -69,8 +69,9 @@ type Connection struct {
 	// unset field becomes tls.VersionTLS12, the ADR's floor.
 	MinTLSVersion uint16
 	// HealthCheckInterval is healthCheckInterval. The default (1m, or the one
-	// of WithHealthCheckInterval) and the bounds (10s to 1h) are applied, so it
-	// is never zero.
+	// of WithHealthCheckInterval) and the bounds (10s to 1h) are applied, so on
+	// success it is never zero. (ConnectionFor also sets it on an error;
+	// Resolve returns an empty Connection then.)
 	HealthCheckInterval time.Duration
 }
 
