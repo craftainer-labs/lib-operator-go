@@ -151,6 +151,33 @@ func Resolve(ctx context.Context, c client.Client, claimNS string, ref Ref, opts
 	return connection(ctx, c, srv, secretNS)
 }
 
+// ConnectionFor returns the connection settings of srv itself, an already read
+// server, for work that has no claim: the server's own health probe (package
+// probe). There is no claim namespace, so allowedNamespaces is not consulted.
+// The admin Secret and the CA bundle come from the operator namespace (cluster
+// server) or the server's namespace (namespaced one), under the same checks as
+// Resolve.
+func ConnectionFor(ctx context.Context, c client.Client, srv Server, opts ...Option) (Connection, error) {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+	namespaced, err := c.IsObjectNamespaced(srv)
+	if err != nil {
+		return Connection{}, fmt.Errorf("server %q: %w", srv.GetName(), err)
+	}
+	secretNS := srv.GetNamespace()
+	if !namespaced {
+		if secretNS = cfg.operatorNamespace; secretNS == "" {
+			secretNS = os.Getenv(OperatorNamespaceEnv)
+		}
+		if secretNS == "" {
+			return Connection{}, ErrOperatorNamespaceUnset
+		}
+	}
+	return connection(ctx, c, srv, secretNS)
+}
+
 // serverTypes caches which registered type serves a kind, so Resolve does not
 // walk every type of the scheme on each reconcile. A scheme is complete before
 // the manager starts, so a successful lookup does not change; a failed one is
@@ -318,8 +345,14 @@ func proxy(raw string) (*url.URL, error) {
 }
 
 func healthCheckInterval(d *metav1.Duration) time.Duration {
+	return HealthCheckInterval(d, defaultHealthCheckInterval)
+}
+
+// HealthCheckInterval returns the server's healthCheckInterval limited to the
+// bounds of the CRD (10s to 1h), or def when it is unset.
+func HealthCheckInterval(d *metav1.Duration, def time.Duration) time.Duration {
 	if d == nil {
-		return defaultHealthCheckInterval
+		return def
 	}
 	return min(max(d.Duration, minHealthCheckInterval), maxHealthCheckInterval)
 }

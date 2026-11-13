@@ -23,7 +23,8 @@ in [`docs/crd-drafts.md`](docs/crd-drafts.md). The FIPS CI job and the
 | `pkg/apis/common` | Shared API types: conditions, references, management policies, selectors |
 | `pkg/lifecycle` | `External`, `Rotator` and `Claim` interfaces and `Reconcile`, delete and rotation handling |
 | `pkg/lifecycle/lifecycletest` | Fakes for testing operators built on `pkg/lifecycle` |
-| `pkg/server` | `Resolve`: server lookup that enforces `allowedNamespaces` |
+| `pkg/server` | `Resolve`: server lookup that enforces `allowedNamespaces`; `ConnectionFor`: a server's own connection settings |
+| `pkg/probe` | `Prober` and `Reconciler`: write a server kind's `ServerStatus` (version, probe time, `Ready`, `ServerReachable`) |
 | `pkg/binding` | `WriteSecret`: `servicebinding.io/<type>` Secrets |
 | `pkg/naming` | `Tenant`: deterministic, collision-safe external names |
 | `pkg/conditions` | `Ready`, `Synced`, `ServerReachable` |

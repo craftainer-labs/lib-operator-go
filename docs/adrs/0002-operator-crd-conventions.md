@@ -738,6 +738,42 @@ name containing `.`).
   makes a non-approved algorithm fail the test instead of passing silently.
   PostgreSQL passwords are SCRAM-SHA-256 only (never MD5).
 
+### 14. Server status
+
+Added after the library was implemented (NOXprobe, 2026-11-13): the server
+kinds' `ServerStatus` (`observedGeneration`, `conditions`, `serverVersion`,
+`lastProbeTime`) was promised by every CRD and written by nothing. `pkg/probe`
+writes it, so an operator only supplies the backend call.
+
+- The operator implements `probe.Prober`:
+  `Probe(ctx, server, connection) (version, error)`, using its own cached
+  backend client; the library reads the connection settings
+  (`server.ConnectionFor`, the same checks as `Resolve` minus the claim
+  namespace) and owns the schedule, the conditions and the status write.
+  `probe.Reconciler` is the controller-runtime wiring for a cluster-scoped or
+  a namespaced kind alike; the kind adds `GetServerStatus()` to what
+  `server.Server` already needs.
+- Schedule: every `spec.healthCheckInterval` (default 1m, bounded 10s to 1h)
+  plus up to 10% jitter. A failed probe is returned as an error, so
+  controller-runtime backs off. A server's own spec change (generation) probes
+  at once; the controller's own status writes do not (generation predicate).
+- Conditions: `ServerReachable` and `Ready` (not `Synced`, which is a claim's).
+  Success: both `True`, reason `Available`. Probe error: both `False`, reason
+  `ServerUnreachable`, last known `serverVersion` kept. Admin Secret in a
+  forbidden namespace: both `False`, reason `AdminSecretNamespaceForbidden`,
+  requeued without error. Connection settings unreadable (missing Secret,
+  invalid proxy or CA reference): `ServerReachable=Unknown`, `Ready=False`,
+  reason `ReconcileError`, returned as an error. Messages are fixed and
+  coarse; the raw error is only returned, so it reaches the controller's log
+  and never the status, which every reader of the server can see.
+- Status churn: the status is written only when a condition, `serverVersion`
+  or `observedGeneration` changes. `lastProbeTime` is rewritten on those
+  changes and otherwise every 10 minutes (`Options.RefreshInterval`), not on
+  every probe, so it means "the last probe whose result was recorded" and
+  stays at most that old while the operator runs; a healthy fleet writes no
+  status per server per minute. Every condition carries the generation it was
+  evaluated for, and `observedGeneration` is set with it.
+
 ## Consequences
 
 - Five operators and one library share one vocabulary, so a user who knows
