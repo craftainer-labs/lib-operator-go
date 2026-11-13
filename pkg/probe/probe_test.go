@@ -376,8 +376,8 @@ func TestUnreadableConnectionSettings(t *testing.T) {
 		t.Fatalf("res = %+v, err = %v, calls = %d", res, err, p.calls)
 	}
 	st := getTeam(t, c).Status
-	cond(t, st, conditions.ServerReachable, metav1.ConditionUnknown, conditions.ReconcileError)
-	c2 := cond(t, st, conditions.Ready, metav1.ConditionFalse, conditions.ReconcileError)
+	cond(t, st, conditions.ServerReachable, metav1.ConditionUnknown, conditions.InvalidServer)
+	c2 := cond(t, st, conditions.Ready, metav1.ConditionFalse, conditions.InvalidServer)
 	if strings.Contains(c2.Message, "admin") {
 		t.Errorf("the raw error is in the status: %q", c2.Message)
 	}

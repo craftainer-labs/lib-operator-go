@@ -208,7 +208,7 @@ Every claim has this common status (`ClaimStatus`):
   `message` and `lastTransitionTime`, so `kubectl wait --for=condition=Ready`
   works and a missing condition always means "operator not running".
   Reasons used: `Available`, `Creating`, `Updating`, `Deleting`,
-  `ReconcileSuccess`, `ReconcileError`, `ServerUnreachable`,
+  `ReconcileSuccess`, `ReconcileError`, `InvalidServer`, `ServerUnreachable`,
   `ServerNotFound`, `NamespaceNotAllowed`, `AdminSecretNamespaceForbidden`,
   `NameCollision`, `ObserveOnly`, `ManagementPolicyBlocked`,
   `RotationUnsupported`, `Rotating`.
@@ -763,7 +763,7 @@ writes it, so an operator only supplies the backend call.
   forbidden namespace: both `False`, reason `AdminSecretNamespaceForbidden`,
   requeued without error. Connection settings unreadable (missing Secret,
   invalid proxy or CA reference): `ServerReachable=Unknown`, `Ready=False`,
-  reason `ReconcileError`, returned as an error. Messages are fixed and
+  reason `InvalidServer`, returned as an error. Messages are fixed and
   coarse; the raw error is only returned, so it reaches the controller's log
   and never the status, which every reader of the server can see.
 - Status churn: the status is written only when a condition, `serverVersion`

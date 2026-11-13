@@ -137,7 +137,7 @@ func cryptoJitter() float64 {
 //     ServerReachable=False, reason AdminSecretNamespaceForbidden, and is
 //     requeued at the interval without an error (editing the server triggers
 //     it). Any other failure to read the settings gets Ready=False,
-//     ServerReachable=Unknown, reason ReconcileError, and is returned.
+//     ServerReachable=Unknown, reason InvalidServer, and is returned.
 //   - A probe error sets Ready=False and ServerReachable=False, reason
 //     ServerUnreachable, keeps the last known serverVersion and is returned,
 //     so controller-runtime backs off. Success sets both True (reason
@@ -167,7 +167,7 @@ func Reconcile(ctx context.Context, c client.Client, srv Server, p Prober, opts 
 			return every, save(ctx, c, srv, changed)
 		}
 		changed = setConditions(st, gen, metav1.ConditionUnknown, metav1.ConditionFalse,
-			conditions.ReconcileError, msgNotResolvable, msgNotResolvedRdy) || changed
+			conditions.InvalidServer, msgNotResolvable, msgNotResolvedRdy) || changed
 		return ctrl.Result{}, errors.Join(fmt.Errorf("server %q: %w", name, err), save(ctx, c, srv, changed))
 	}
 
