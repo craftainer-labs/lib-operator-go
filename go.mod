@@ -6,7 +6,7 @@ module github.com/craftainer-labs/lib-operator-go
 // moves with scripts/develop.d/10-go.sh's GO_VERSION.
 go 1.26.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/go-logr/logr v1.4.3
