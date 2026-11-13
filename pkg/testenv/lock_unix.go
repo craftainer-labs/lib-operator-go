@@ -16,7 +16,7 @@ import (
 // the Fd and Close calls below fail harmlessly on a nil *os.File.
 func lockSetup() func() {
 	f, _ := os.OpenFile(filepath.Join(os.TempDir(), "lib-operator-go-setup-envtest.lock"), os.O_CREATE|os.O_RDWR, 0o600)
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX) //nolint:gosec // G115: a file descriptor fits in an int
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 	// Closing the file releases the lock.
 	return func() { _ = f.Close() }
 }
