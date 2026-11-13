@@ -404,6 +404,26 @@ func TestOperatorNamespace(t *testing.T) {
 	}
 }
 
+func TestTransientReadFailureLeavesTheStatusAlone(t *testing.T) {
+	var writes int
+	f := counting(&writes)
+	f.Get = func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, o ...client.GetOption) error {
+		if _, ok := obj.(*corev1.Secret); ok {
+			return errors.New("etcd timeout")
+		}
+		return c.Get(ctx, key, obj, o...)
+	}
+	c := newClient(t, f, teamServer(nil), admin("team-a"))
+	p := &stub{}
+	res, err := probe.Reconcile(context.Background(), c, getTeam(t, c), p, opts(&clock{t0}))
+	if err == nil || res != (ctrl.Result{}) || p.calls != 0 || writes != 0 {
+		t.Errorf("res = %+v, err = %v, calls = %d, writes = %d", res, err, p.calls, writes)
+	}
+	if n := len(getTeam(t, c).Status.Conditions); n != 0 {
+		t.Errorf("%d conditions were written", n)
+	}
+}
+
 // noScope is a client that cannot tell whether a kind is namespaced.
 type noScope struct{ client.Client }
 

@@ -762,8 +762,9 @@ writes it, so an operator only supplies the backend call.
   `ServerUnreachable`, last known `serverVersion` kept. Admin Secret in a
   forbidden namespace: both `False`, reason `AdminSecretNamespaceForbidden`,
   requeued without error. Connection settings unreadable (missing Secret,
-  invalid proxy or CA reference): `ServerReachable=Unknown`, `Ready=False`,
-  reason `InvalidServer`, returned as an error. Messages are fixed and
+  invalid proxy or CA reference, operator namespace unset): `ServerReachable=Unknown`, `Ready=False`,
+  reason `InvalidServer`, returned as an error. Any other read failure (an
+  API server error) is returned alone and leaves the status as it was. Messages are fixed and
   coarse; the raw error is only returned, so it reaches the controller's log
   and never the status, which every reader of the server can see.
 - Status churn: the status is written only when a condition, `serverVersion`

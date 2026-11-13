@@ -136,8 +136,11 @@ func cryptoJitter() float64 {
 //     admin Secret is in a forbidden namespace gets Ready=False and
 //     ServerReachable=False, reason AdminSecretNamespaceForbidden, and is
 //     requeued at the interval without an error (editing the server triggers
-//     it). Any other failure to read the settings gets Ready=False,
-//     ServerReachable=Unknown, reason InvalidServer, and is returned.
+//     it). Settings that are missing or invalid (a missing Secret or
+//     ConfigMap, an invalid proxy URL or CA reference, an unset operator
+//     namespace) get Ready=False, ServerReachable=Unknown, reason
+//     InvalidServer, and are returned. Any other failure (an API server error,
+//     say) is returned alone and leaves the status as it was.
 //   - A probe error sets Ready=False and ServerReachable=False, reason
 //     ServerUnreachable, keeps the last known serverVersion and is returned,
 //     so controller-runtime backs off. Success sets both True (reason
@@ -159,6 +162,9 @@ func Reconcile(ctx context.Context, c client.Client, srv Server, p Prober, opts 
 
 	conn, err := server.ConnectionFor(ctx, c, srv, server.WithOperatorNamespace(opts.OperatorNamespace))
 	if err != nil {
+		if !misconfigured(err) { // an API hiccup says nothing about the server
+			return ctrl.Result{}, fmt.Errorf("server %q: %w", name, err)
+		}
 		changed := observe(st, gen)
 		if errors.Is(err, server.ErrAdminSecretNamespaceForbidden) {
 			changed = setConditions(st, gen, metav1.ConditionFalse, metav1.ConditionFalse,
@@ -194,6 +200,16 @@ func Reconcile(ctx context.Context, c client.Client, srv Server, p Prober, opts 
 		return ctrl.Result{}, errors.Join(fmt.Errorf("probe server %q: %w", name, perr), serr)
 	}
 	return every, serr
+}
+
+// misconfigured reports whether err from server.ConnectionFor is a property of
+// the server's configuration (so it belongs in the status) and not a transient
+// failure such as an API server timeout, which is only returned.
+func misconfigured(err error) bool {
+	return errors.Is(err, server.ErrAdminSecretNamespaceForbidden) ||
+		errors.Is(err, server.ErrInvalidServer) ||
+		errors.Is(err, server.ErrOperatorNamespaceUnset) ||
+		apierrors.IsNotFound(err)
 }
 
 // observe records the generation the status is about and reports a change.
