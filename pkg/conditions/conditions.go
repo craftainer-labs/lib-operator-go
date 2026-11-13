@@ -48,6 +48,10 @@ const (
 	// Reconciling is the reason of a condition that was set to Unknown on the
 	// first reconcile and not evaluated yet.
 	Reconciling = "Reconciling"
+	// InvalidServer is the reason of a server whose own connection settings
+	// cannot be read (missing Secret, invalid proxy or CA reference, operator
+	// namespace unset): a configuration problem, not a transient failure.
+	InvalidServer = "InvalidServer"
 )
 
 // Event reasons that are not condition reasons (ADR 0002, section 11). The

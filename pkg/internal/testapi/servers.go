@@ -88,3 +88,9 @@ func (s *WidgetServer) GetEndpoint() string { return s.Spec.Endpoint }
 
 // GetAllowedNamespaces returns nil: a namespaced server is implicitly Same.
 func (s *WidgetServer) GetAllowedNamespaces() *common.AllowedNamespaces { return nil }
+
+// GetServerStatus returns status.
+func (s *ClusterWidgetServer) GetServerStatus() *common.ServerStatus { return &s.Status }
+
+// GetServerStatus returns status.
+func (s *WidgetServer) GetServerStatus() *common.ServerStatus { return &s.Status }

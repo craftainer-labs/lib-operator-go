@@ -208,7 +208,7 @@ Every claim has this common status (`ClaimStatus`):
   `message` and `lastTransitionTime`, so `kubectl wait --for=condition=Ready`
   works and a missing condition always means "operator not running".
   Reasons used: `Available`, `Creating`, `Updating`, `Deleting`,
-  `ReconcileSuccess`, `ReconcileError`, `ServerUnreachable`,
+  `ReconcileSuccess`, `ReconcileError`, `InvalidServer`, `ServerUnreachable`,
   `ServerNotFound`, `NamespaceNotAllowed`, `AdminSecretNamespaceForbidden`,
   `NameCollision`, `ObserveOnly`, `ManagementPolicyBlocked`,
   `RotationUnsupported`, `Rotating`.
@@ -737,6 +737,67 @@ name containing `.`).
 - A CI job runs the library's tests once with `GODEBUG=fips140=only`, which
   makes a non-approved algorithm fail the test instead of passing silently.
   PostgreSQL passwords are SCRAM-SHA-256 only (never MD5).
+
+### 14. Server status
+
+Added after the library was implemented (NOXprobe, 2026-11-13): the server
+kinds' `ServerStatus` (`observedGeneration`, `conditions`, `serverVersion`,
+`lastProbeTime`) was promised by every CRD and written by nothing. `pkg/probe`
+writes it, so an operator only supplies the backend call.
+
+- The operator implements `probe.Prober`:
+  `Probe(ctx, server, connection) (version, error)`, using its own cached
+  backend client; the library reads the connection settings
+  (`server.ConnectionFor`, the same checks as `Resolve` minus the claim
+  namespace, and one shared implementation) and owns the schedule, the
+  conditions and the status write. `probe.Reconciler` is the single entry
+  point, the controller-runtime wiring for a cluster-scoped or a namespaced
+  kind alike; the kind adds `GetServerStatus()` to what `server.Server`
+  already needs. The only knobs are `Options` and `Reconciler.Controller`
+  (`controller.Options`, e.g. `MaxConcurrentReconciles`); the clock and the
+  jitter source are unexported.
+- Schedule: a health check, as in Kubernetes, runs every
+  `spec.healthCheckInterval` (default 1m, or `Options.DefaultInterval`;
+  bounded 10s to 1h) plus up to 10% jitter whether the last probe succeeded or
+  not. A failed probe is recorded and logged, not returned as an error, so
+  controller-runtime's backoff (5ms doubling to about 1000s) never stretches
+  the interval of a failing server. Reconcile returns an error only for a
+  status write that fails and for a read of the connection settings that fails
+  for a reason other than the server's configuration (an API server error,
+  which leaves the status as it was). If the context is cancelled while
+  probing (the manager stops), nothing is recorded.
+- Triggers: a server's own spec change (generation) probes at once; the
+  controller's own status writes do not (generation predicate, applied to the
+  server watch only). The controller also watches the Secrets and ConfigMaps
+  the servers name (the admin Secret, the CA bundle) and probes the servers
+  that use a changed one at once, so creating a missing Secret recovers
+  without waiting for the interval. The mapping lists the cached servers on
+  each event and matches by reference name (and namespace where it is known:
+  a cluster server's Secrets are in the operator namespace, so it matches by
+  name), which may probe a server needlessly and never misses one. The
+  operator needs get, list and watch on Secrets and ConfigMaps and patch on
+  `servers/status`.
+- Conditions: `ServerReachable` and `Ready` (not `Synced`, which is a claim's).
+  Success: both `True`, reason `Available`. Probe error: both `False`, reason
+  `ServerUnreachable`, last known `serverVersion` kept. Admin Secret in a
+  forbidden namespace: both `False`, reason `AdminSecretNamespaceForbidden`.
+  Connection settings missing or invalid (a missing Secret or ConfigMap, an
+  invalid proxy or CA reference, operator namespace unset):
+  `ServerReachable=Unknown`, `Ready=False`, reason `InvalidServer`; the
+  observed generation is stamped (it says the spec was evaluated) while
+  `lastProbeTime` and `serverVersion` stay as they were. The last two cases are
+  requeued at the interval without an error. Messages are fixed and coarse; the
+  raw error is only logged, and never reaches the status, which every reader
+  of the server can see. A failure is logged at Error when its condition
+  changes and at V(1) while it persists.
+- Status churn: the status is patched (merge patch, so a concurrent writer
+  cannot make it conflict) only when a condition, `serverVersion` or
+  `observedGeneration` changes. `lastProbeTime` is rewritten on those
+  changes and otherwise every 10 minutes (`Options.RefreshInterval`), not on
+  every probe, so it means "the last probe whose result was recorded" and
+  stays at most that old while the operator runs; a healthy fleet writes no
+  status per server per minute. Every condition carries the generation it was
+  evaluated for, and `observedGeneration` is set with it.
 
 ## Consequences
 

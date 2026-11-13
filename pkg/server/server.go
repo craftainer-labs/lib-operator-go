@@ -68,8 +68,10 @@ type Connection struct {
 	// (tls.VersionTLS12 or tls.VersionTLS13). Resolve never returns zero: an
 	// unset field becomes tls.VersionTLS12, the ADR's floor.
 	MinTLSVersion uint16
-	// HealthCheckInterval is healthCheckInterval. Resolve applies the default
-	// (1m) and the bounds (10s to 1h), so it is never zero.
+	// HealthCheckInterval is healthCheckInterval. The default (1m, or the one
+	// of WithHealthCheckInterval) and the bounds (10s to 1h) are applied, so on
+	// success it is never zero. (ConnectionFor also sets it on an error;
+	// Resolve returns an empty Connection then.)
 	HealthCheckInterval time.Duration
 }
 
@@ -99,12 +101,39 @@ var (
 // Option configures Resolve.
 type Option func(*config)
 
-type config struct{ operatorNamespace string }
+type config struct {
+	operatorNamespace string
+	defaultInterval   time.Duration
+}
+
+// operatorNS returns the operator namespace of the option or the environment.
+func (cfg config) operatorNS() (string, error) {
+	ns := cmp.Or(cfg.operatorNamespace, os.Getenv(OperatorNamespaceEnv))
+	if ns == "" {
+		return "", ErrOperatorNamespaceUnset
+	}
+	return ns, nil
+}
+
+// interval is the default healthCheckInterval of a server that sets none.
+func (cfg config) interval() time.Duration {
+	if cfg.defaultInterval <= 0 {
+		return defaultHealthCheckInterval
+	}
+	return cfg.defaultInterval
+}
 
 // WithOperatorNamespace sets the operator's own namespace, the only namespace a
 // cluster server's admin Secret and CA bundle may come from.
 func WithOperatorNamespace(ns string) Option {
 	return func(c *config) { c.operatorNamespace = ns }
+}
+
+// WithHealthCheckInterval sets the Connection.HealthCheckInterval of a server
+// that sets no healthCheckInterval; the default is 1m. A server's own value is
+// still bounded to 10s..1h; the default given here is used as it is.
+func WithHealthCheckInterval(def time.Duration) Option {
+	return func(c *config) { c.defaultInterval = def }
 }
 
 // Resolve returns the connection settings of the server ref names, for a claim
@@ -127,7 +156,7 @@ func Resolve(ctx context.Context, c client.Client, claimNS string, ref Ref, opts
 		return Connection{}, fmt.Errorf("server kind %q: %w", ref.Kind, err)
 	}
 	key := types.NamespacedName{Name: ref.Name}
-	secretNS := cfg.operatorNamespace
+	var secretNS string
 	if namespaced {
 		key.Namespace, secretNS = claimNS, claimNS
 	}
@@ -141,14 +170,47 @@ func Resolve(ctx context.Context, c client.Client, claimNS string, ref Ref, opts
 		if err := checkNamespace(ctx, c, claimNS, srv.GetAllowedNamespaces()); err != nil {
 			return Connection{}, err
 		}
-		if secretNS == "" {
-			secretNS = os.Getenv(OperatorNamespaceEnv)
-		}
-		if secretNS == "" {
-			return Connection{}, ErrOperatorNamespaceUnset
+		if secretNS, err = cfg.operatorNS(); err != nil {
+			return Connection{}, err
 		}
 	}
-	return connection(ctx, c, srv, secretNS)
+	return connection(ctx, c, srv, secretNS, cfg)
+}
+
+// ConnectionFor returns the connection settings of srv itself, an already read
+// server, for work that has no claim: the server's own health probe (package
+// probe). There is no claim namespace, so allowedNamespaces is not consulted.
+// The admin Secret and the CA bundle come from the operator namespace (cluster
+// server) or the server's namespace (namespaced one), under the same checks as
+// Resolve (they share one implementation). A namespaced server without a
+// namespace is ErrInvalidServer. On an error the Connection is empty except for
+// HealthCheckInterval, so a caller can still schedule its next attempt.
+func ConnectionFor(ctx context.Context, c client.Client, srv Server, opts ...Option) (Connection, error) {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+	conn, err := connectionFor(ctx, c, srv, cfg)
+	// Set even on an error, so a caller can still schedule its next attempt.
+	conn.HealthCheckInterval = healthCheckInterval(srv.GetCommon().HealthCheckInterval, cfg.interval())
+	return conn, err
+}
+
+func connectionFor(ctx context.Context, c client.Client, srv Server, cfg config) (Connection, error) {
+	namespaced, err := c.IsObjectNamespaced(srv)
+	if err != nil {
+		return Connection{}, fmt.Errorf("server %q: %w", srv.GetName(), err)
+	}
+	secretNS := srv.GetNamespace()
+	if namespaced && secretNS == "" {
+		return Connection{}, fmt.Errorf("%w: namespaced server %q has no namespace", ErrInvalidServer, srv.GetName())
+	}
+	if !namespaced {
+		if secretNS, err = cfg.operatorNS(); err != nil {
+			return Connection{}, err
+		}
+	}
+	return connection(ctx, c, srv, secretNS, cfg)
 }
 
 // serverTypes caches which registered type serves a kind, so Resolve does not
@@ -211,7 +273,7 @@ func checkNamespace(ctx context.Context, c client.Client, claimNS string, allowe
 	return nil
 }
 
-func connection(ctx context.Context, c client.Client, srv Server, secretNS string) (Connection, error) {
+func connection(ctx context.Context, c client.Client, srv Server, secretNS string, cfg config) (Connection, error) {
 	cm := srv.GetCommon()
 	ref := cm.AdminCredentialsSecretRef
 	if ref.Namespace != "" && ref.Namespace != secretNS {
@@ -232,7 +294,7 @@ func connection(ctx context.Context, c client.Client, srv Server, secretNS strin
 		Endpoint:            srv.GetEndpoint(),
 		Admin:               admin,
 		MinTLSVersion:       tls.VersionTLS12,
-		HealthCheckInterval: healthCheckInterval(cm.HealthCheckInterval),
+		HealthCheckInterval: healthCheckInterval(cm.HealthCheckInterval, cfg.interval()),
 	}
 	if cm.TLS != nil {
 		out.ServerName = cm.TLS.ServerName
@@ -317,9 +379,11 @@ func proxy(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-func healthCheckInterval(d *metav1.Duration) time.Duration {
+// healthCheckInterval returns the server's healthCheckInterval limited to the
+// bounds of the CRD (10s to 1h), or def when it is unset.
+func healthCheckInterval(d *metav1.Duration, def time.Duration) time.Duration {
 	if d == nil {
-		return defaultHealthCheckInterval
+		return def
 	}
 	return min(max(d.Duration, minHealthCheckInterval), maxHealthCheckInterval)
 }
