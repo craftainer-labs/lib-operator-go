@@ -847,7 +847,8 @@ to it after the next library release.
   With a proxy `Dialer` accepts only an IP address and `HostDialer` resolves a
   name once, checks every address and asks the proxy for an address, never the
   name. The proxy's own address is checked too. A proxied destination must also
-  have a numeric port and no zone identifier. A decimal, octal or hexadecimal
+  have a canonical port (1 to 65535, checked before any name is resolved) and
+  no zone identifier. A decimal, octal or hexadecimal
   IPv4 notation is not a canonical IP address, so it fails closed as a name
   with a proxy and is judged by the resolver's answer without one.
 - Defects fixed in the move (both deferred from NO5b-1): the HTTP CONNECT

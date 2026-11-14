@@ -123,6 +123,16 @@ func TestCheckTarget(t *testing.T) {
 			t.Errorf("%q: %v", addr, err)
 		}
 	}
+	for _, port := range []string{"0", "080", "00443", "+80", "65536", "1e3", "0x50", " 80"} {
+		if err := p.checkTarget("8.8.8.8:" + port); !errors.Is(err, ErrBlocked) {
+			t.Errorf("port %q: %v", port, err)
+		}
+	}
+	for _, port := range []string{"1", "80", "65535"} {
+		if err := p.checkTarget("8.8.8.8:" + port); err != nil {
+			t.Errorf("port %q: %v", port, err)
+		}
+	}
 	if err := p.checkTarget("[2606:4700::1111]:443"); err != nil {
 		t.Errorf("public address: %v", err)
 	}
@@ -567,6 +577,16 @@ func TestHostDialerResolvesBeforeTheProxy(t *testing.T) {
 	}
 	if _, err := dial(ctx, "tcp", "no-port"); !errors.Is(err, ErrBlocked) {
 		t.Errorf("no port: %v", err)
+	}
+	// A bad port is refused before the name is looked up.
+	looked := calls.Load()
+	for _, addr := range []string{"store.example.test:abc", "store.example.test:0", "store.example.test:080", "store.example.test:65536", "store.example.test:"} {
+		if _, err := dial(ctx, "tcp", addr); !errors.Is(err, ErrBlocked) {
+			t.Errorf("%s: %v", addr, err)
+		}
+	}
+	if n := calls.Load(); n != looked {
+		t.Errorf("%d lookups for destinations with a bad port", n-looked)
 	}
 
 	strict, err := NewPolicy(ModeStrict).HostDialer(u)

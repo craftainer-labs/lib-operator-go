@@ -111,15 +111,17 @@ func (p Policy) Dialer(proxy *url.URL, opts ...Option) (DialFunc, error) {
 // checkTarget checks the destination handed to a proxied dial. It must be an
 // IP address: a host name would be resolved by the proxy, where this policy
 // cannot see the answer, so it fails closed. HostDialer resolves names itself
-// and hands the dialer addresses. The port must be a number and the address must have no zone. Only the canonical notations netip accepts
-// are addresses; 2130706433, 0x7f.1 and 0177.0.0.1 are host names here.
+// and hands the dialer addresses. The port must be a canonical number from 1
+// to 65535, and the address must have no zone (a proxy cannot be given one,
+// although a direct dial can use one). Only the canonical notations netip
+// accepts are addresses; 2130706433, 0x7f.1 and 0177.0.0.1 are host names here.
 func (p Policy) checkTarget(addr string) error {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("%w: %q", ErrBlocked, addr)
 	}
-	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
-		return fmt.Errorf("%w: %q is not a port", ErrBlocked, port)
+	if err := checkPort(port); err != nil {
+		return err
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
@@ -131,6 +133,17 @@ func (p Policy) checkTarget(addr string) error {
 		return fmt.Errorf("%w: %q has a zone", ErrBlocked, host)
 	}
 	return p.Check(ip)
+}
+
+// checkPort accepts only the canonical decimal spelling of a port from 1 to
+// 65535, so the text the proxy is given is the number the policy saw ("080",
+// "+80" and "0" are refused).
+func checkPort(port string) error {
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || n == 0 || strconv.FormatUint(n, 10) != port {
+		return fmt.Errorf("%w: %q is not a port", ErrBlocked, port)
+	}
+	return nil
 }
 
 // lookup resolves a host name; a variable so a test can answer.
@@ -154,6 +167,11 @@ func (p Policy) HostDialer(proxy *url.URL, opts ...Option) (DialFunc, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %q", ErrBlocked, addr)
+		}
+		// Refuse a bad port before the name is resolved: a name the policy
+		// will refuse anyway is not looked up.
+		if err := checkPort(port); err != nil {
+			return nil, err
 		}
 		if _, err := netip.ParseAddr(host); err == nil {
 			return dial(ctx, network, addr)
