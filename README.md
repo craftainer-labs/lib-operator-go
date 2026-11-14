@@ -25,6 +25,7 @@ in [`docs/crd-drafts.md`](docs/crd-drafts.md). The FIPS CI job and the
 | `pkg/lifecycle/lifecycletest` | Fakes for testing operators built on `pkg/lifecycle` |
 | `pkg/server` | `Resolve`: server lookup that enforces `allowedNamespaces`; `ConnectionFor`: a server's own connection settings |
 | `pkg/probe` | `Prober` and `Reconciler`: write a server kind's `ServerStatus` (version, probe time, `Ready`, `ServerReachable`) |
+| `pkg/egress` | `Policy`, `Dialer` and `HostDialer`: block backend connections to loopback, link-local, metadata, special-purpose (and in `strict` mode private) addresses after name resolution, through an optional proxy, with a bounded tunnel set-up |
 | `pkg/binding` | `WriteSecret`: `servicebinding.io/<type>` Secrets |
 | `pkg/naming` | `Tenant`: deterministic, collision-safe external names |
 | `pkg/conditions` | `Ready`, `Synced`, `ServerReachable` |

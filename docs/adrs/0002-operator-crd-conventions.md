@@ -799,6 +799,70 @@ writes it, so an operator only supplies the backend call.
   status per server per minute. Every condition carries the generation it was
   evaluated for, and `observedGeneration` is set with it.
 
+### 15. Egress policy
+
+Added after the library was implemented (NOX-egress, 2026-11-14): the four
+operators each carried a copy of `internal/egress`, which limits where a
+tenant-controlled server address may send the operator's backend connections
+(user decisions 1 and 2, 2026-11-03: the proxy may not carry credentials, and
+every connection is checked after name resolution). The copies were identical
+but for comments, and for operator-db lacking `HostDialer` (it passes
+addresses, not names). `pkg/egress` is the single copy; the operators switch
+to it after the next library release.
+
+- Public surface, the part the operators call today: `EnvMode`, `Mode` with
+  `ModeStrict` and `ModeAllowPrivate`, `ParseMode`, `Policy`, `NewPolicy`,
+  `Policy.Check`, `Policy.Dialer`, `Policy.HostDialer`, `DialFunc`, and the
+  errors `ErrBlocked`, `ErrProxyUserinfo`, `ErrInvalidMode` and `ErrProxy`. The
+  one addition is `Option` and `WithConnectTimeout`, variadic on `Dialer` and
+  `HostDialer` so a call site that passes no option compiles as before.
+  `ModeAllowPrivate` is the only exported name no operator references yet; it
+  is the second value of the mode a startup flag selects.
+- Modes (`EGRESS_MODE`, NO2b and NO3b; default `strict`): `allow-private`
+  blocks every address in the IANA IPv4 and IPv6 Special-Purpose Address
+  Registries (RFC 6890) that is never a backend, and `strict` adds the private
+  rows (RFC 1918, RFC 6598 shared address space, RFC 4193 unique-local). The
+  blocked set covers loopback, unspecified, link-local (which holds the cloud
+  metadata address), multicast, the reserved top of IPv4, IETF protocol
+  assignments (`192.0.0.0/24` and `2001::/23`, which hold Oracle's metadata
+  address, AS112, AMT and the anycast addresses), documentation (RFC 5737,
+  `2001:db8::/32`, `3fff::/20`), benchmarking, discard-only `100::/64`, the
+  dummy prefix `100:0:0:1::/64`, ORCHID and ORCHIDv2, SRv6 SIDs, deprecated
+  site-local and IPv4-compatible space, and the metadata addresses of
+  Alibaba Cloud, AWS (IPv6) and Azure. A row that is globally reachable
+  (AS112, AMT) is blocked too: none is a backend. The tables and the registry
+  rows they come from are in `pkg/egress/egress.go` and its test.
+- Embedded IPv4: an IPv6 address that carries an IPv4 one gets the IPv4
+  rules, so a private or loopback IPv4 address cannot be reached through IPv6.
+  The carried address is decoded for IPv4-mapped (`::ffff:0:0/96`), NAT64
+  (`64:ff9b::/96`, RFC 6052, and `64:ff9b:1::/48`, RFC 8215, whose address is
+  split around octet 8), 6to4 (`2002::/16`) and Teredo (`2001::/32`, the
+  client address, inverted). Teredo and 6to4 are not blocked outright: they
+  are judged by the address they carry, as before. A NAT64 gateway with a
+  network-specific prefix cannot be recognised; the operator relies on the
+  well-known and local-use prefixes. A zone identifier is dropped before the
+  check.
+- Where it runs: after resolution, at connect time (`net.Dialer.Control`), so
+  a DNS answer that changes between a check and the connection is not trusted.
+  With a proxy `Dialer` accepts only an IP address and `HostDialer` resolves a
+  name once, checks every address and asks the proxy for an address, never the
+  name. The proxy's own address is checked too. A decimal, octal or hexadecimal
+  IPv4 notation is not a canonical IP address, so it fails closed as a name
+  with a proxy and is judged by the resolver's answer without one.
+- Defects fixed in the move (both deferred from NO5b-1): the HTTP CONNECT
+  exchange had no deadline when the context had none, so a proxy that never
+  answered held the reconcile forever. The tunnel set-up (TLS handshake,
+  CONNECT, SOCKS5 negotiation) is now bounded by `WithConnectTimeout`, 30
+  seconds by default and never unbounded, and ends at the earlier context
+  deadline or on cancellation. And some transition ranges were missing: the
+  registry rows above, which also now cover the zero `netip.Addr` (blocked) and
+  IPv4 documentation ranges. A server's first bytes that arrive with the proxy's
+  response are no longer dropped.
+- Consequence for the operators: addresses in the documentation ranges
+  (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32`) are
+  blocked, so a test that stands in a documentation address for a public
+  host needs another one (or the zero `Policy`).
+
 ## Consequences
 
 - Five operators and one library share one vocabulary, so a user who knows
