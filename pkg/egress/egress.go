@@ -67,9 +67,10 @@ var (
 		"224.0.0.0/4",     // Multicast, RFC 5771 (the IANA multicast registry, not the special-purpose one)
 		"240.0.0.0/4",     // Reserved, RFC 1112 section 4 (holds 255.255.255.255, Limited Broadcast, RFC 919)
 		// IPv6.
-		"::/96",          // Unspecified (::/128) and the deprecated IPv4-compatible addresses (::a.b.c.d, RFC 4291 section 2.5.5.1), and loopback (::1/128, RFC 4291)
-		"100::/64",       // Discard-Only Address Block, RFC 6666
-		"100:0:0:1::/64", // Dummy IPv6 Prefix, RFC 9780
+		"::/96",           // Unspecified (::/128) and the deprecated IPv4-compatible addresses (::a.b.c.d, RFC 4291 section 2.5.5.1), and loopback (::1/128, RFC 4291)
+		"::ffff:0:0:0/96", // IPv4-translated (SIIT) addresses ::ffff:0:a.b.c.d, RFC 2765, obsoleted by RFC 6145 (not in the registry)
+		"100::/64",        // Discard-Only Address Block, RFC 6666
+		"100:0:0:1::/64",  // Dummy IPv6 Prefix, RFC 9780
 		// IETF Protocol Assignments (2001::/23, RFC 2928) except Teredo
 		// (2001::/32), which is checked through its embedded IPv4 address
 		// below. The remaining /23 is the rows 2001:1::/32 (PCP, TURN and
@@ -89,7 +90,7 @@ var (
 		"fec0::/10",         // Site-local, deprecated, RFC 3879 (not in the registry)
 		"ff00::/8",          // Multicast, RFC 4291 (the IANA multicast registry)
 		// Cloud metadata addresses outside the ranges above.
-		"100.100.100.200/32", "fd00:ec2::254/128", "168.63.129.16/32",
+		"100.100.100.200/32", "fd00:ec2::254/128", "fd20:ce::254/128", "168.63.129.16/32",
 	)
 	// privateBlocked is added in ModeStrict: the registry rows that are
 	// forwardable but not globally reachable, which a cluster uses for its

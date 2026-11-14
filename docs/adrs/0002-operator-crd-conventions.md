@@ -828,8 +828,8 @@ to it after the next library release.
   address, AS112, AMT and the anycast addresses), documentation (RFC 5737,
   `2001:db8::/32`, `3fff::/20`), benchmarking, discard-only `100::/64`, the
   dummy prefix `100:0:0:1::/64`, ORCHID and ORCHIDv2, SRv6 SIDs, deprecated
-  site-local and IPv4-compatible space, and the metadata addresses of
-  Alibaba Cloud, AWS (IPv6) and Azure. A row that is globally reachable
+  site-local, IPv4-compatible and IPv4-translated (SIIT) space, and the
+  metadata addresses of Alibaba Cloud, AWS (IPv6), GCP (IPv6) and Azure. A row that is globally reachable
   (AS112, AMT) is blocked too: none is a backend. The tables and the registry
   rows they come from are in `pkg/egress/egress.go` and its test.
 - Embedded IPv4: an IPv6 address that carries an IPv4 one gets the IPv4
@@ -846,7 +846,8 @@ to it after the next library release.
   a DNS answer that changes between a check and the connection is not trusted.
   With a proxy `Dialer` accepts only an IP address and `HostDialer` resolves a
   name once, checks every address and asks the proxy for an address, never the
-  name. The proxy's own address is checked too. A decimal, octal or hexadecimal
+  name. The proxy's own address is checked too. A proxied destination must also
+  have a numeric port and no zone identifier. A decimal, octal or hexadecimal
   IPv4 notation is not a canonical IP address, so it fails closed as a name
   with a proxy and is judged by the resolver's answer without one.
 - Defects fixed in the move (both deferred from NO5b-1): the HTTP CONNECT

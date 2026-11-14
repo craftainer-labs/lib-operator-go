@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -110,16 +111,24 @@ func (p Policy) Dialer(proxy *url.URL, opts ...Option) (DialFunc, error) {
 // checkTarget checks the destination handed to a proxied dial. It must be an
 // IP address: a host name would be resolved by the proxy, where this policy
 // cannot see the answer, so it fails closed. HostDialer resolves names itself
-// and hands the dialer addresses. Only the canonical notations netip accepts
+// and hands the dialer addresses. The port must be a number and the address must have no zone. Only the canonical notations netip accepts
 // are addresses; 2130706433, 0x7f.1 and 0177.0.0.1 are host names here.
 func (p Policy) checkTarget(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("%w: %q", ErrBlocked, addr)
+	}
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+		return fmt.Errorf("%w: %q is not a port", ErrBlocked, port)
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
 		return fmt.Errorf("%w: %q is not an IP address", ErrBlocked, host)
+	}
+	// A zone is not part of an address the proxy can be given (SOCKS5 would
+	// send "addr%zone" as a name for the proxy to resolve).
+	if ip.Zone() != "" {
+		return fmt.Errorf("%w: %q has a zone", ErrBlocked, host)
 	}
 	return p.Check(ip)
 }

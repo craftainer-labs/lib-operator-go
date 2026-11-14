@@ -116,8 +116,15 @@ func TestCheckTarget(t *testing.T) {
 			t.Errorf("%q: %v", addr, err)
 		}
 	}
-	if err := p.checkTarget("[2606:4700::1111%eth0]:443"); err != nil {
-		t.Errorf("public address with a zone: %v", err)
+	// A zone and a port that is not a number are refused before the proxy is
+	// told about them.
+	for _, addr := range []string{"[2606:4700::1111%eth0]:443", "8.8.8.8:abc", "8.8.8.8:99999", "8.8.8.8:-1", "8.8.8.8:", "8.8.8.8:80\r\nHost: x"} {
+		if err := p.checkTarget(addr); !errors.Is(err, ErrBlocked) {
+			t.Errorf("%q: %v", addr, err)
+		}
+	}
+	if err := p.checkTarget("[2606:4700::1111]:443"); err != nil {
+		t.Errorf("public address: %v", err)
 	}
 }
 

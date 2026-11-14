@@ -76,6 +76,7 @@ var blockedRows = []registryRow{
 	{"::1/128", "Loopback Address", "RFC 4291"},
 	{"::/128", "Unspecified Address", "RFC 4291"},
 	{"::/96", "IPv4-compatible Address (deprecated)", "RFC 4291 section 2.5.5.1"},
+	{"::ffff:0:0:0/96", "IPv4-translated (SIIT) address", "RFC 2765, RFC 6145; not in the registry"},
 	{"100::/64", "Discard-Only Address Block", "RFC 6666"},
 	{"100:0:0:1::/64", "Dummy IPv6 Prefix", "RFC 9780"},
 	// 2001::/23 is "IETF Protocol Assignments" (RFC 2928) and is not
@@ -106,6 +107,7 @@ var blockedRows = []registryRow{
 	{"5f00::/16", "Segment Routing (SRv6) SIDs", "RFC 9602"},
 	{"fe80::/10", "Link-Local Unicast", "RFC 4291"},
 	{"fd00:ec2::254/128", "AWS metadata address, in Unique-Local", "not in the registry"},
+	{"fd20:ce::254/128", "GCP metadata address, in Unique-Local", "not in the registry"},
 	// Not in the special-purpose registry.
 	{"fec0::/10", "Site-local (deprecated)", "RFC 3879"},
 	{"ff00::/8", "Multicast", "RFC 4291 section 2.7"},
@@ -257,7 +259,7 @@ func TestPolicyCheckEmbeddedIPv4(t *testing.T) {
 	for _, s := range []string{
 		"::ffff:127.0.0.1", "::ffff:7f00:1", "0:0:0:0:0:ffff:a9fe:a9fe", "64:ff9b::7f00:1", "64:ff9b::127.0.0.1",
 		"64:ff9b:1:7f00:0:1::", "2002:7f00:1::", "2001:0:4136:e378:8000:63bf:80ff:fffe",
-		"::127.0.0.1", "::7f00:1", "::a9fe:a9fe",
+		"::127.0.0.1", "::7f00:1", "::a9fe:a9fe", "::ffff:0:7f00:1", "::ffff:0:127.0.0.1",
 	} {
 		if err := allow.Check(netip.MustParseAddr(s)); !errors.Is(err, ErrBlocked) {
 			t.Errorf("%s is not blocked: %v", s, err)
