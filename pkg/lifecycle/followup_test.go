@@ -263,7 +263,10 @@ func TestRotationMarkOfAnotherSequenceIsIgnored(t *testing.T) {
 	if rs := h.gadget("g").Status.Rotation; rs.Active != "gen-1" {
 		t.Errorf("status.rotation = %+v", rs)
 	}
-	if got := h.secret("g").Annotations["craftainer.dev/rotation-sequence"]; got != "1" {
+	if lifecycle.AnnotationRotationSequence != "craftainer.dev/rotation-sequence" {
+		t.Errorf("lifecycle.AnnotationRotationSequence = %q: the key is part of the API and of existing Secrets", lifecycle.AnnotationRotationSequence)
+	}
+	if got := h.secret("g").Annotations[lifecycle.AnnotationRotationSequence]; got != "1" {
 		t.Errorf("sequence mark = %q, want 1", got)
 	}
 }
