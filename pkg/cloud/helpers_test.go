@@ -36,9 +36,9 @@ func writeFile(t *testing.T, name, content string) string {
 
 // hits counts the requests a fake server answered.
 type hits struct {
-	n    atomic.Int32
-	mu   sync.Mutex
-	form map[string][]string
+	n     atomic.Int32
+	mu    sync.Mutex
+	form  map[string][]string
 	authz string
 }
 

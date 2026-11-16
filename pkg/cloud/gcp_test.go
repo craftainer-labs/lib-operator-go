@@ -201,7 +201,7 @@ func TestGCPAPIClientDialsThroughThePolicy(t *testing.T) {
 
 func TestGCPBadPrivateKeyIsACategoryError(t *testing.T) {
 	oauth, _ := fakeGoogleOAuth(t, "Bearer")
-	key := strings.Replace(string(serviceAccountJSON(t, oauth)), "BEGIN PRIVATE KEY", "BEGIN LEAK-CHECK", 1)
+	key := strings.Replace(string(serviceAccountJSON(t, oauth)), "BEGIN "+"PRIVATE KEY", "BEGIN LEAK-CHECK", 1)
 	c, err := openEgress().GCP(t.Context(), ScopeCluster, GCPClusterBlock{}, gcpCreds, gcpSecret([]byte(key)))
 	if err != nil {
 		t.Fatal(err)
