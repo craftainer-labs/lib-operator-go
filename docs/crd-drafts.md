@@ -1,7 +1,7 @@
 # CRD drafts for the five craftainer.dev groups
 
 API for the five groups, written to the conventions of
-[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted; section 16 is Proposed and decided, see "Cloud providers (proposed)" at the end; the user approved
+[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted; section 16 is decided and partly implemented, see "Cloud providers (proposed)" at the end; the user approved
 the G-api decisions on 2026-11-01 and they are folded in). All kinds are `v1alpha1`. Nothing here is
 implemented; the field tables are what the API types and CRD schemas will be
 generated from. The shared blocks are Go types in `lib-operator-go`'s
@@ -556,8 +556,10 @@ spec:
 
 ## Cloud providers (proposed)
 
-**Proposed**, decided at G-api (user, 2026-11-16, all eleven questions); it
-becomes Accepted when NK0 implements it. The field names and shapes below are
+Decided at G-api (user, 2026-11-16, all eleven questions); **Accepted** for the
+shared types, credential resolution, egress and token sources that NK0
+implemented in `pkg/cloud` (ADR 0002 section 16.9) and **Proposed** for the
+operators' own kinds. The field names and shapes below are
 the decided ones, with the reasoning, the Kubernetes API conventions they
 follow, the decisions and the sources in
 [ADR 0002 section 16](adrs/0002-operator-crd-conventions.md). The self-hosted

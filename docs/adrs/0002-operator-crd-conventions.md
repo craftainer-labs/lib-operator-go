@@ -9,8 +9,10 @@ in "Decisions (G-api, 2026-11-01)" at the end). The ADR became Accepted when
 NO1b's implementation merged, as `docs/adrs/README.md` requires.
 
 Section 16 (cloud providers) is a later addition. The user decided its eleven
-questions on 2026-11-16 (16.8), but it stays **Proposed** and becomes Accepted
-when NK0 implements it, as `docs/adrs/README.md` requires.
+questions on 2026-11-16 (16.8). It is **Accepted for the parts NK0 implements**
+in `pkg/cloud` and `pkg/lifecycle` (16.9 lists them) and stays **Proposed** for
+the rest, which the operators' NK items implement, as `docs/adrs/README.md`
+requires.
 
 ## Context
 
@@ -872,10 +874,10 @@ to it after the next library release.
 
 ### 16. Cloud providers
 
-Status: **Proposed**, decided at G-api (user, 2026-11-16: all eleven leans of
-16.8 accepted); it becomes Accepted when NK0 implements it. Nothing in this
-section is implemented, and the Accepted status of sections 1 to 15 is
-unaffected. The plan's NK0 and NK* items follow from it.
+Status: decided at G-api (user, 2026-11-16: all eleven leans of 16.8
+accepted). **Accepted** for what NK0 implemented in this library (16.9); the
+rest is **Proposed** until the operators' NK items merge. The Accepted status
+of sections 1 to 15 is unaffected. The plan's NK* items follow from it.
 
 Context (plan decision log, 2026-11-16): every operator gains native AWS, GCP
 and Azure backends next to its self-hosted one, behind the same claim kinds,
@@ -1312,6 +1314,68 @@ authentication], [Cloud SQL IAM authentication], [Azure PostgreSQL Entra
 authentication], [ElastiCache RBAC], [Memorystore ACL policies], [AWS IoT
 `CreateKeysAndCertificate`], and the NKR1 findings in the plan's decision log
 (2026-11-16).
+
+#### 16.9 Implementation (NK0, lib-operator-go)
+
+Accepted, implemented in the library:
+
+- `pkg/cloud` types, with the markers and CEL of 16.1 to 16.3: `ProviderType`
+  (immutable), `CredentialsSource`, `SecretRef`, `Credentials` and
+  `NamespacedCredentials`, and the provider blocks `AWSBlock`, `GCPBlock` and
+  `AzureBlock` plus their `...ClusterBlock` forms. Decision 2 and decision 3 are
+  enforced by the type split and not by CEL alone: a namespaced kind embeds the
+  plain block, which has no `endpointOverride` field, and
+  `NamespacedCredentials`, whose CEL requires `source: Secret`. The resolvers
+  check both again at run time (`ErrWorkloadIdentityForbidden`,
+  `ErrEndpointOverrideForbidden`).
+- Credential resolution (16.2), `Egress.AWS`, `Egress.GCP` and `Egress.Azure`:
+  the SDK's default chain for `WorkloadIdentity`, the fixed Secret keys for
+  `Secret`, and a GCP key accepted only as `service_account` (decision 10).
+  Errors are categories (`ErrCredentialsUnavailable` and three others) and
+  carry no SDK text or secret value.
+- Egress (section 15): every HTTP client dials through
+  `Policy.HostDialer`, the STS, Google OAuth and Entra token endpoints
+  included; `endpointOverride` is honoured only for a cluster-scoped server in
+  `allow-private` mode (decision 3), and loopback stays refused.
+- Token sources for the IAM logins of 16.4: `RDSTokenSource` (15 minutes),
+  `AzureTokenSource` with `AzurePostgresScope` and `AzureRedisScope`,
+  `GCPTokenSource` (Memorystore AUTH), and `CachedSource`, which refreshes a
+  token a margin before it expires.
+- The "pending, requeue in X" signal of decision 8:
+  `lifecycle.PendingError`, returned by any `External` method. It requeues
+  after its own interval, shorter than the 30 second poll minimum, with no
+  error and so no backoff, and sets `Synced=True` and `Ready=False` with the
+  reason the `External` names (16.6).
+
+Deviations from the text above, found while implementing:
+
+- `WorkloadIdentity` on Azure is `WorkloadIdentityCredential` only, not
+  `DefaultAzureCredential`. The chain's managed identity endpoint is a
+  link-local address the egress policy blocks, and the chain also runs the
+  Azure CLI. The same holds for EC2 instance metadata on AWS, which fails
+  closed; IRSA and EKS Pod Identity work.
+- The platform's own credential sources are not dialled through the policy:
+  the EKS Pod Identity agent (`AWS_CONTAINER_CREDENTIALS_FULL_URI`) and the
+  GCE and GKE metadata server are link-local addresses the policy blocks, the
+  operator's environment chooses them and a tenant cannot, and the SDKs use their
+  own clients for them. Everything that leaves the pod for a host a claim or a
+  Secret can influence goes through the policy.
+- `endpointOverride` on Azure replaces the Entra authority host (which MSAL
+  requires to be https) and is handed back for the operator's own service
+  client; on GCP and AWS it is the API endpoint.
+
+Not implemented here, left to the operators' NK items:
+
+- The operators' own CRD types, the cross-field CEL of the server spec
+  (the `provider` union, `credentials` only with `provider`), the new condition
+  and Event reasons, `status.discovered`, the binding keys of 16.5 and the
+  probe. The controller must read the credentials Secret itself and refuse a
+  namespace other than the operator's (`CredentialsNamespaceForbidden`).
+- IAM tokens for ElastiCache and MemoryDB (a SigV4-presigned request), and the
+  Cloud SQL connector, which refreshes its own token; operator-db and
+  operator-cache add them.
+- Emulator and recorded-shape tests of the data planes. The tests of this
+  library use fake STS, OAuth and Entra endpoints; no emulator enforces IAM.
 
 ## Consequences
 
