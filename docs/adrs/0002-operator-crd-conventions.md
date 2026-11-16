@@ -933,10 +933,15 @@ Rules (CEL on the server spec unless noted):
   CEL can reject them when `provider` is set (a defaulted field is always
   present to CEL).
 - `credentials` is allowed only with `provider`.
-  `credentials.source == 'Secret'` requires `credentials.secretRef`;
-  `WorkloadIdentity` forbids it. `secretRef` is `{name, namespace?}` with the
-  same namespace rules as `adminCredentialsSecretRef` (cluster server: the
-  operator's namespace only, namespaced server: none). It has no `key`: the key
+  `!has(self.credentials) || (self.credentials.source == 'Secret' ?
+  has(self.credentials.secretRef) : !has(self.credentials.secretRef))`: `Secret`
+  requires `credentials.secretRef`, `WorkloadIdentity` forbids it, and an
+  absent `credentials` passes (it means `WorkloadIdentity`). `secretRef` is `{name, namespace?}` with the
+  same namespace rules as `adminCredentialsSecretRef`: a namespaced server
+  forbids `namespace` (CEL), and a cluster server requires it (CEL) and the
+  controller refuses any namespace but the operator's (CEL cannot know it),
+  with the new reason `CredentialsNamespaceForbidden`, as
+  `AdminSecretNamespaceForbidden` does for the admin Secret. It has no `key`: the key
   names are fixed per cloud (16.2).
 - `adminCredentialsSecretRef` keeps its meaning, the login to the data plane.
   It is therefore still required for `ClusterDatabaseServer` and
@@ -948,10 +953,12 @@ Rules (CEL on the server spec unless noted):
   read from the cloud: `endpoint`, `port`, `resourceId` (RDS `DbiResourceId`
   or `DbClusterResourceId`), `accountId`, `region`. The probe (section 14)
   fills it, and claims read it from the cached server.
-- New condition reasons: `CredentialsUnavailable` (no workload identity
+- New condition reasons, on server kinds unless stated:
+  `CredentialsNamespaceForbidden`, `CredentialsUnavailable` (no workload identity
   injected, Secret missing or malformed), `TargetNotFound` (the named instance,
-  user pool or namespace does not exist), `AuthModeUnsupported`,
-  `IAMPrincipalRequired`, `EndpointOverrideForbidden`. Messages stay coarse
+  user pool or namespace does not exist) and `EndpointOverrideForbidden` are
+  server reasons; `AuthModeUnsupported` and `IAMPrincipalRequired` are claim
+  reasons (`Synced=False`). Section 11 uses the same strings as Event reasons. Messages stay coarse
   (section 14).
 
 #### 16.2 `credentials.source`
@@ -1026,7 +1033,11 @@ the naming rules apply as before):
 | mqtt | none beyond `region`: the operator reads the account's IoT data endpoint (`DescribeEndpoint`, `iot:Data-ATS`) | dropped | `eventGridNamespace` (name, in `resourceGroup`) |
 | oidc | `cognito: {userPoolID, domain}`; `domain` (the hosted-UI domain prefix or custom domain) is needed to build the token and authorization endpoints | dropped | `entra: {}` only: the target is the tenant (`tenantID`) |
 
-For oidc the discriminator is the existing `type` (extended with `Cognito`
+For oidc the rules of 16.1 and 16.2 apply with `type` in place of
+`provider`: `credentials` only with `type` `Cognito` or `Entra`, a namespaced
+server must use `Secret` for those types, `adminCredentialsSecretRef` is
+forbidden for them, and `issuer` is required only for `Keycloak` and
+`DynamicRegistration`. For oidc the discriminator is the existing `type` (extended with `Cognito`
 and `Entra`, with blocks `cognito` and `entra`), not a second `provider`
 (open question 1). `issuer` is derived (`https://cognito-idp.<region>.amazonaws.com/<userPoolID>`,
 and the tenant's v2.0 issuer).
@@ -1071,8 +1082,10 @@ spec:
   `!has(self.iam) || self.authMode == 'IAM'`, and `rotationPolicy` is
   forbidden in IAM mode: `self.authMode == 'Password' ||
   !has(self.rotationPolicy)`. In IAM mode there is nothing to rotate; the
-  `craftainer.dev/rotate` annotation produces a Warning Event with the
-  existing reason `RotationUnsupported` and `status.rotation` stays empty.
+  `craftainer.dev/rotate` annotation produces a Warning Event with the new
+  reason `RotationNotApplicable` and `status.rotation` stays empty.
+  (`RotationUnsupported` keeps its section 8 meaning: a backend that cannot
+  overlap credentials.)
 - Per backend in IAM mode:
 
 | Backend | What the operator creates | Consumer's login |
@@ -1085,10 +1098,18 @@ spec:
 
 - Deviation from section 10 ("a claim can never choose an external name"): on
   Cloud SQL and Azure the database user's name must be the principal's name, so
-  in those two modes `iam.principal` is chosen by the claim. The protections
-  are the section 10 ownership marker (`COMMENT ON ROLE` with the claim's UID)
-  and `NameCollision` against a role that exists unmarked or with another UID,
-  so a tenant cannot take over or drop another tenant's login. A tenant can
+  in those two modes `iam.principal` is chosen by the claim. If this section is
+  accepted, section 10's sentence is amended to say "except the database user
+  of an IAM-mode claim on Cloud SQL and Azure"; until then section 10 stands
+  as written and this is the one exception. The check runs in PostgreSQL on
+  the role, not on the cloud API object: before `users.insert` or
+  `pgaadauth_create_principal` the operator requires that no role of that name
+  exists (otherwise `NameCollision`), and right after it sets the section 10
+  marker (`COMMENT ON ROLE` with the claim's UID). A crash between the two
+  leaves an unmarked role, which then reads as `NameCollision` until an
+  administrator removes it: it fails closed. An existing unmarked role or one
+  marked with another UID is never adopted, so a tenant cannot take over or
+  drop another tenant's login. A tenant can
   still name any principal in the project and give it access to its own
   database; it gains nothing outside that database. Open question 6 asks for an
   optional allow-list on cluster servers.
@@ -1109,9 +1130,11 @@ All cloud bindings keep the section 7 type (`postgresql`, `redis`, `s3`,
 | `instanceConnectionName` | `project:location:instance` | Cloud SQL, both modes |
 | `region` | the AWS region | AWS db and cache |
 
-`IAM` mode, db and cache: the keys are `host`, `port`, `database` (db),
-`username`, `sslmode` and `sslrootcert` (db), `uri` without a password, plus
-the keys above. There is **no `password`** and no `uri` that embeds one. For
+`IAM` mode, db: `host`, `port`, `database`, `username`, `sslmode`,
+`sslrootcert`, `uri` without a password, plus the keys above. Cache: `host`,
+`port`, `username`, `uri` (`rediss://`, no password), `keyPrefix` and
+`sslrootcert` (the server's `tls.caBundle`, as in section 7), plus the keys
+above. There is **no `password`** and no `uri` that embeds one. For
 GCP and Azure `username` is the principal's name (the consumer's own identity,
 which is the "principal name"); for AWS `username` is the derived role or user
 id and `iamResourceArn` is the "ARN" the consumer must be authorized for.
@@ -1159,6 +1182,23 @@ as in section 3:
 | OidcClient × Cognito | app client name | app client ID (also `clientId` in the binding) |
 | OidcClient × Entra | app registration name | application object ID (`clientId` in the binding is the app ID) |
 
+Naming and the marker (section 10) for the new objects. An object that can
+carry a tag or label holds the marker `craftainer.dev/claim` and uses
+`HashShort`; one that cannot uses `HashLong`:
+
+| Backend object | `sep` | `hl` | `maxLen` | Marker |
+| --- | --- | --- | --- | --- |
+| AWS IAM user (s3) | `-` | `HashShort` | 64 (IAM limit) | tag |
+| IoT policy | `-` | `HashShort` | 128 | tag |
+| IoT client id | `-` | `HashShort` | 128 | none needed (not an object) |
+| ElastiCache and MemoryDB user id | `-` | `HashShort` | 40, letters, digits, hyphens; must start with a letter and has no consecutive hyphens | tag (both services tag users); a leading digit gets a `u` prefix inside `maxLen` and doubled hyphens are collapsed: the exact rule is verified in NKcache-1 |
+| Memorystore ACL policy | `-` | `HashLong` until a label on it is confirmed (NKcache-2) | 63 | unconfirmed |
+| Cognito app client name | `-` | `HashShort` | 128 | none; found by the client ID in `externalId` |
+| Entra app registration display name | `-` | `HashLong` | 120 | none; found by object ID in `externalId` |
+
+The cloud-native object names are checked against each service's limits in
+that operator's ADR 0005; only the rows above change the section 10 rules.
+
 `ElastiCache` and `MemoryDB` users are API-only and asynchronous: a user is
 `creating`, `active`, `modifying` or `deleting`, and the SDKs have no waiter
 for it (NKR1). The operator polls `DescribeUsers` (and the user group or ACL
@@ -1196,6 +1236,11 @@ error. That is an addition to NK0, not a change to this ADR's decisions
   released operator should not depend on a preview API (no SLA, may change).
   Revisit at GA; the `provider.type` enum for cache lists `AWS` and `GCP`
   until then.
+- Not drafted here: `externalName`, `externalId` and binding keys for
+  `BucketAccess` on GCP (service account) and Azure (SAS or Entra RBAC) and
+  for `Bucket` on Azure. NKs3-2 and NKs3-3 specify them in the operator's ADR
+  0005 before implementing, and send any change to this section back to
+  G-api.
 - Not offered in `v1alpha1`: certificate credentials for Azure, sovereign
   clouds beyond what the AWS region and ARN partition imply, and the operator
   creating its own cloud identity.

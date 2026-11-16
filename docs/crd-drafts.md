@@ -1,7 +1,7 @@
 # CRD drafts for the five craftainer.dev groups
 
 API for the five groups, written to the conventions of
-[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted, section 16 Proposed; the user approved
+[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted; section 16 is Proposed, see "Cloud providers (proposed)" at the end; the user approved
 the G-api decisions on 2026-11-01 and they are folded in). All kinds are `v1alpha1`. Nothing here is
 implemented; the field tables are what the API types and CRD schemas will be
 generated from. The shared blocks are Go types in `lib-operator-go`'s
@@ -560,7 +560,9 @@ spec:
 G-api (NK-api, 2026-11-16), with the reasoning, the Kubernetes API
 conventions it follows, the open questions and the sources in
 [ADR 0002 section 16](adrs/0002-operator-crd-conventions.md). The self-hosted
-kinds above are unchanged when `spec.provider` is absent.
+kinds above are unchanged when `spec.provider` is absent. Rules that depend
+on open questions 1, 4 and 11 (the discriminator, the Azure admin login and
+the s3 schema defaults) are provisional and change with the user's answers.
 
 ### `CloudServerCommon` (every server kind of a cloud-capable group)
 
@@ -573,12 +575,12 @@ Added to `ServerCommon`; cluster and namespaced kinds alike.
 | `provider.gcp` | object | iff `type: GCP` | | |
 | `provider.azure` | object | iff `type: Azure` | | |
 | `credentials.source` | enum | no | `WorkloadIdentity` when `credentials` is present; an absent `credentials` is read as `WorkloadIdentity` | `WorkloadIdentity`, `Secret` |
-| `credentials.secretRef` | `{name, namespace?}` | iff `source: Secret` | | `name` maxLength 253; cluster server: `namespace` required and equal to the operator's; namespaced server: `namespace` forbidden. Keys are fixed per cloud (below) |
+| `credentials.secretRef` | `{name, namespace?}` | iff `source: Secret` | | `name` maxLength 253; cluster server: `namespace` required (CEL) and equal to the operator's (controller, reason `CredentialsNamespaceForbidden`); namespaced server: `namespace` forbidden (CEL). Keys are fixed per cloud (below) |
 
 CEL on the server spec:
 
 - `credentials` only with `provider`: `!has(self.credentials) || has(self.provider)`.
-- `has(self.credentials) && self.credentials.source == 'Secret' ? has(self.credentials.secretRef) : !has(self.credentials.secretRef)`.
+- `!has(self.credentials) || (self.credentials.source == 'Secret' ? has(self.credentials.secretRef) : !has(self.credentials.secretRef))`.
 - Namespaced kinds only, no workload identity: `!has(self.provider) || (has(self.credentials) && self.credentials.source == 'Secret')`.
 - `host` (db, cache, mqtt) and `endpoint` (s3) are required iff `provider` is absent; with a provider they are optional overrides of the discovered data-plane address. s3's `region`, `pathStyle` and `backend` lose their schema defaults (the controller applies them) and are forbidden with a provider.
 - `adminCredentialsSecretRef` (the data-plane login) stays required on the db server kinds; on the s3, mqtt, cache and oidc server kinds it is forbidden with a provider (the cloud API credential is `credentials`).
@@ -606,9 +608,9 @@ Secret keys of `credentials.secretRef` (fixed, no `key`):
 
 Server status adds `discovered` (map of string, maxProperties 10, values
 maxLength 512): `endpoint`, `port`, `resourceId`, `accountId`, `region`, as the
-operator read them. New condition reasons: `CredentialsUnavailable`,
-`TargetNotFound`, `AuthModeUnsupported`, `IAMPrincipalRequired`,
-`EndpointOverrideForbidden`.
+operator read them. New server condition reasons: `CredentialsNamespaceForbidden`,
+`CredentialsUnavailable`, `TargetNotFound`, `EndpointOverrideForbidden`; new claim
+reasons: `AuthModeUnsupported`, `IAMPrincipalRequired`.
 
 What the operator's ServiceAccount needs (the user adds it; the operator never
 creates an identity or a grant):
@@ -630,19 +632,23 @@ creates an identity or a grant):
 CEL: `!has(self.iam) || self.authMode == 'IAM'`, and `self.authMode ==
 'Password' || !has(self.rotationPolicy)`. In `IAM` mode there is no rotation:
 `status.rotation` stays empty and `craftainer.dev/rotate` raises a Warning
-Event with reason `RotationUnsupported`. A claim cannot choose its external
+Event with the new reason `RotationNotApplicable`. A claim cannot choose its external
 name, except that on Cloud SQL and Azure the database user is named by
 `iam.principal` (ownership marker and `NameCollision` still apply).
 
 Binding keys added on a cloud server: `cloud` (`aws`, `gcp`, `azure`),
 `authMode` (db and cache), `iamResourceArn` (AWS, `IAM`), `instanceConnectionName`
 (Cloud SQL), `region` (AWS db and cache). In `IAM` mode there is no `password`
-and no `uri` with one.
+and no `uri` with one; a cache binding keeps `keyPrefix`, `sslrootcert` and the
+`rediss://` `uri`, as in ADR 0002 section 7.
 
 ### db × cloud
 
 `ClusterDatabaseServer` and `DatabaseServer` include `CloudServerCommon`
-(`adminCredentialsSecretRef` stays required). Target fields:
+(`adminCredentialsSecretRef` stays required). **Provisional (open question 4):**
+Azure `authMode: IAM` needs the operator's own Entra identity as the data-plane
+administrator, which a required password Secret cannot express; the draft keeps
+the Secret required and the `IAM` mode on Azure unresolved. Target fields:
 
 | Cloud | Field | Req | Notes |
 | --- | --- | --- | --- |
@@ -689,7 +695,8 @@ or `instanceConnectionName` (Cloud SQL).
 | `gcp` | `project`, `location` | bucket location; `BucketAccess` uses a service account (the emulator has no HMAC keys) |
 | `azure` | `storageAccount` | 3 to 24 lowercase letters and digits; access by SAS or Entra RBAC, decided in NKs3-3 |
 
-`Bucket` status: `externalName` is the bucket, `externalId` its ARN or
+`BucketAccess` on GCP and Azure and `Bucket` on Azure are not drafted yet
+(NKs3-2, NKs3-3). `Bucket` status: `externalName` is the bucket, `externalId` its ARN or
 resource name. `BucketAccess × AWS`: `externalName` is the IAM user,
 `externalId` its ARN, `rotation.active` the access key ID; binding keys as
 before plus `cloud`.
@@ -785,7 +792,10 @@ The discriminator is the existing `type`, extended with `Cognito` and
 | `cognito.roleARN` | string | no | as `provider.aws.roleARN` |
 | `entra.tenantID` | string | with `Entra` | GUID |
 
-CEL: exactly the block matching `type` is set; `issuer` is derived for the
+CEL, with `type` standing where `provider` does in `CloudServerCommon`:
+exactly the block matching `type` is set; `credentials` only with `Cognito` or
+`Entra`; a namespaced server with those types must use `Secret`;
+`adminCredentialsSecretRef` is forbidden for them; `issuer` is derived for the
 cloud types (so it is required only for `Keycloak` and `DynamicRegistration`);
 `credentials.source` follows the common rules (Azure `Secret` keys `clientId`
 and `clientSecret`). `OidcClient` is unchanged: `externalName` is the client
