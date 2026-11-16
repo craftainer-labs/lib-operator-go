@@ -1,6 +1,7 @@
 package cloud
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -176,6 +177,23 @@ func TestRDSTokenSource(t *testing.T) {
 	if exp.Before(before.Add(RDSTokenLifetime)) || exp.After(time.Now().Add(RDSTokenLifetime)) {
 		t.Errorf("expiry %v is not 15 minutes from issue", exp)
 	}
+
+	// The token cannot outlive the credentials that signed it.
+	soon := time.Now().Add(2 * time.Minute)
+	short := aws.Config{Region: "eu-west-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{AccessKeyID: "ASIAFAKE", SecretAccessKey: "fake-secret-key", CanExpire: true, Expires: soon}, nil
+	})}
+	if _, exp, err := RDSTokenSource(short, "db.example.test:5432", "app_role").Token(t.Context()); err != nil || !exp.Equal(soon) {
+		t.Errorf("expiry = %v, %v; want %v", exp, err, soon)
+	}
+	failing := aws.Config{Region: "eu-west-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{}, errors.New("LEAK-CHECK")
+	})}
+	_, _, err = RDSTokenSource(failing, "db.example.test:5432", "app_role").Token(t.Context())
+	if !errors.Is(err, ErrCredentialsUnavailable) {
+		t.Errorf("failing credentials: %v", err)
+	}
+	noSecret(t, err, "LEAK-CHECK")
 
 	// A missing port and missing credentials fail with a category.
 	_, _, err = RDSTokenSource(cfg, "db.example.test", "app_role").Token(t.Context())

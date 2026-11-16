@@ -40,13 +40,17 @@ type AzureClient struct {
 // the block's tenant; Secret is a client secret from secret["clientId"] and
 // secret["clientSecret"]. Managed identity is not used: its endpoint is
 // link-local and the Policy blocks it. The authority, and every call the
-// credential makes, goes through the Policy. The authority must be https; an
+// credential makes, goes through the Policy. The authority must be https
+// (ErrInvalidEndpoint otherwise), and the override is that authority; an
 // override disables Entra instance discovery, as a private authority needs.
 // Tokens are fetched on first use.
 func (e Egress) Azure(_ context.Context, scope Scope, p AzureClusterBlock, c *Credentials, secret map[string][]byte) (*AzureClient, error) {
 	endpoint, err := e.endpoint(scope, p.EndpointOverride)
 	if err != nil {
 		return nil, err
+	}
+	if endpoint != "" && !strings.HasPrefix(endpoint, "https://") {
+		return nil, fmt.Errorf("%w: the Entra authority must be https", ErrInvalidEndpoint)
 	}
 	src, err := source(scope, c)
 	if err != nil {

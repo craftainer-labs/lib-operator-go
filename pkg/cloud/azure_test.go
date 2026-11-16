@@ -161,3 +161,11 @@ func TestAzureAuthorityDialsThroughThePolicy(t *testing.T) {
 		t.Errorf("Entra was reached %d times", h.count())
 	}
 }
+
+func TestAzureAuthorityMustBeHTTPS(t *testing.T) {
+	isolateAzure(t)
+	p := AzureClusterBlock{AzureBlock: AzureBlock{TenantID: testTenant}, EndpointOverride: "http://10.1.2.3:8080"}
+	if _, err := openEgress().Azure(t.Context(), ScopeCluster, p, azureSecretRef, azureKeys()); !errors.Is(err, ErrInvalidEndpoint) {
+		t.Errorf("Azure = %v", err)
+	}
+}

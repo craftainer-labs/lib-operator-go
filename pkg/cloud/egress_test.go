@@ -1,8 +1,10 @@
 package cloud
 
 import (
+	"crypto/x509"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"testing"
@@ -177,5 +179,40 @@ func TestNamespacedCredentialsAsCredentials(t *testing.T) {
 	got := (&NamespacedCredentials{Source: SourceSecret, SecretRef: ref}).AsCredentials()
 	if got.Source != SourceSecret || got.SecretRef != ref {
 		t.Errorf("AsCredentials = %+v", got)
+	}
+}
+
+func TestRedirects(t *testing.T) {
+	other, otherHits := newServer(t, func(http.ResponseWriter, *http.Request) {})
+	var self *httptest.Server
+	self, _ = newServerRaw(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/same":
+			http.Redirect(w, r, "/done", http.StatusFound)
+		case "/other":
+			http.Redirect(w, r, other.URL, http.StatusFound)
+		case "/loop":
+			http.Redirect(w, r, "/loop", http.StatusFound)
+		case "/downgrade":
+			http.Redirect(w, r, "http://"+r.Host+"/done", http.StatusFound)
+		}
+	}, true)
+	e := openEgress()
+	e.RootCAs = x509.NewCertPool()
+	e.RootCAs.AddCert(self.Certificate())
+	c, err := e.HTTPClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := getErr(c, self.URL+"/same"); err != nil {
+		t.Errorf("same-host redirect: %v", err)
+	}
+	for _, path := range []string{"/other", "/loop", "/downgrade"} {
+		if err := getErr(c, self.URL+path); !errors.Is(err, errRedirectRefused) {
+			t.Errorf("%s: %v", path, err)
+		}
+	}
+	if otherHits.count() != 0 {
+		t.Errorf("the redirect target was reached %d times", otherHits.count())
 	}
 }

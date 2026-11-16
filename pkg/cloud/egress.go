@@ -3,6 +3,7 @@ package cloud
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -63,15 +64,42 @@ func (e Egress) transport() (*http.Transport, error) {
 	}, nil
 }
 
+// maxRedirects bounds the redirects a client follows, as net/http's default.
+const maxRedirects = 10
+
+var errRedirectRefused = errors.New("redirect refused")
+
+// checkRedirect follows a redirect only to the same host and never from https
+// to another scheme. A redirect to another host would resend a request body (a
+// client secret, a signed assertion) there, and a bearer token a transport adds
+// below the client, which net/http does not strip.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	first := via[0].URL
+	switch {
+	case len(via) >= maxRedirects:
+		return fmt.Errorf("%w: too many redirects", errRedirectRefused)
+	case req.URL.Host != first.Host:
+		return fmt.Errorf("%w: another host", errRedirectRefused)
+	case first.Scheme == "https" && req.URL.Scheme != "https":
+		return fmt.Errorf("%w: https to another scheme", errRedirectRefused)
+	}
+	return nil
+}
+
+func newClient(rt http.RoundTripper) *http.Client {
+	return &http.Client{Transport: rt, CheckRedirect: checkRedirect}
+}
+
 // HTTPClient returns an HTTP client whose every connection goes through the
-// Policy. Redirects are followed, and each hop is dialled through the Policy
-// too.
+// Policy and that follows redirects only to the same host (see checkRedirect).
+// Each call builds a new transport and connection pool, so a caller resolves
+// once per server and keeps the result, instead of once per reconcile.
 func (e Egress) HTTPClient() (*http.Client, error) {
 	tr, err := e.transport()
 	if err != nil {
 		return nil, err
 	}
-	return &http.Client{Transport: tr}, nil
+	return newClient(tr), nil
 }
 
 // endpoint returns the endpointOverride to use, "" for none. It is honoured

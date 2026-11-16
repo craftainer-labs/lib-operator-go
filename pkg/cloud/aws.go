@@ -14,6 +14,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
+// retrieveTimeout bounds the one credential retrieval AWS makes.
+const retrieveTimeout = 30 * time.Second
+
 // RDSTokenLifetime is how long an RDS IAM authentication token is valid.
 const RDSTokenLifetime = 15 * time.Minute
 
@@ -63,7 +66,11 @@ func (e Egress) AWS(ctx context.Context, scope Scope, p AWSClusterBlock, c *Cred
 	if p.RoleARN != "" {
 		cfg.Credentials = aws.NewCredentialsCache(stscreds.NewAssumeRoleProvider(sts.NewFromConfig(cfg), p.RoleARN))
 	}
-	if _, err := cfg.Credentials.Retrieve(ctx); err != nil {
+	// The default chain probes EC2 instance metadata, which the Policy blocks and
+	// the SDK retries: bound the wait.
+	rctx, cancel := context.WithTimeout(ctx, retrieveTimeout)
+	defer cancel()
+	if _, err := cfg.Credentials.Retrieve(rctx); err != nil {
 		return aws.Config{}, fmt.Errorf("%w: AWS credentials could not be retrieved", ErrCredentialsUnavailable)
 	}
 	return cfg, nil
@@ -87,10 +94,22 @@ func awsStatic(secret map[string][]byte) (aws.CredentialsProvider, error) {
 func RDSTokenSource(cfg aws.Config, endpoint, user string) TokenSource {
 	return TokenFunc(func(ctx context.Context) (string, time.Time, error) {
 		issued := time.Now()
+		if cfg.Credentials == nil {
+			return "", time.Time{}, fmt.Errorf("%w: no AWS credentials", ErrCredentialsUnavailable)
+		}
+		creds, err := cfg.Credentials.Retrieve(ctx)
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("%w: AWS credentials could not be retrieved", ErrCredentialsUnavailable)
+		}
 		tok, err := rdsauth.BuildAuthToken(ctx, endpoint, cfg.Region, user, cfg.Credentials)
 		if err != nil {
 			return "", time.Time{}, fmt.Errorf("%w: the RDS IAM token could not be built", ErrCredentialsUnavailable)
 		}
-		return tok, issued.Add(RDSTokenLifetime), nil
+		// The signature stops validating when the credentials that made it expire.
+		exp := issued.Add(RDSTokenLifetime)
+		if creds.CanExpire && creds.Expires.Before(exp) {
+			exp = creds.Expires
+		}
+		return tok, exp, nil
 	})
 }

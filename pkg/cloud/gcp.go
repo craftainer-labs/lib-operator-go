@@ -66,7 +66,7 @@ func (e Egress) GCP(_ context.Context, scope Scope, p GCPClusterBlock, c *Creden
 	}
 	opts := &credentials.DetectOptions{
 		Scopes: scopes,
-		Client: &http.Client{Transport: tr},
+		Client: newClient(tr),
 		// Refresh on the caller's goroutine: no background refresh outlives the
 		// context that asked for the token.
 		DisableAsyncRefresh: true,
@@ -85,7 +85,7 @@ func (e Egress) GCP(_ context.Context, scope Scope, p GCPClusterBlock, c *Creden
 	}
 	return &GCPClient{
 		Credentials: creds,
-		HTTPClient:  &http.Client{Transport: &bearerTransport{base: tr, creds: creds}},
+		HTTPClient:  newClient(&bearerTransport{base: tr, creds: creds}),
 		Endpoint:    endpoint,
 	}, nil
 }

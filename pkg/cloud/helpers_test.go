@@ -108,11 +108,23 @@ func noSecret(t *testing.T, err error, values ...string) {
 // newServer starts a fake that counts hits and answers with h.
 func newServer(t *testing.T, h func(http.ResponseWriter, *http.Request)) (*httptest.Server, *hits) {
 	t.Helper()
+	return newServerRaw(t, h, false)
+}
+
+// newServerRaw is newServer, optionally over TLS.
+func newServerRaw(t *testing.T, h func(http.ResponseWriter, *http.Request), useTLS bool) (*httptest.Server, *hits) {
+	t.Helper()
 	c := &hits{}
-	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hf := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		c.record(r)
 		h(w, r)
-	}))
+	})
+	var s *httptest.Server
+	if useTLS {
+		s = httptest.NewTLSServer(hf)
+	} else {
+		s = httptest.NewServer(hf)
+	}
 	t.Cleanup(s.Close)
 	return s, c
 }
