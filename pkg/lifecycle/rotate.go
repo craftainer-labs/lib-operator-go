@@ -106,15 +106,22 @@ func (r *run[S, O]) due(policy *common.RotationPolicy, rs common.RotationStatus,
 	return !r.now.Before(base.Add(interval))
 }
 
-// The annotations of the binding Secret that say which rotation it holds. They
-// are written after the Secret's data, so their presence means the data is
-// the one of that sequence; the status is written last, and when that write
-// fails the next reconcile finds the annotations and adopts the rotation
-// instead of issuing it a second time.
-const (
-	annotationRotationSequence   = "craftainer.dev/rotation-sequence"
-	annotationRotationGeneration = "craftainer.dev/rotation-generation"
-)
+// AnnotationRotationSequence is the annotation of the binding Secret that holds
+// the rotation sequence (a base-10 integer) the lifecycle issued for the
+// Secret's data. The lifecycle sets it on the Secret after the data and before
+// the status records the sequence, so it can be one ahead of
+// status.rotation.sequence while that status write is pending (or failed, until
+// the next reconcile adopts it); once recorded it equals the status. Operators
+// may read it, for example to tell which rotation the Secret they see belongs
+// to; only the lifecycle writes it.
+const AnnotationRotationSequence = "craftainer.dev/rotation-sequence"
+
+// The generation annotation of the binding Secret. It is written together with
+// AnnotationRotationSequence, after the Secret's data, so their presence means
+// the data is the one of that sequence; when the status write fails, the next
+// reconcile finds the annotations and adopts the rotation instead of issuing it
+// a second time.
+const annotationRotationGeneration = "craftainer.dev/rotation-generation"
 
 // begin issues the next generation, writes it to the binding Secret, marks the
 // Secret with the rotation and then records it in the status. A crash before
@@ -197,7 +204,7 @@ func (r *run[S, O]) adoptIssued(rs common.RotationStatus) (Generation, bool, err
 	}
 	gen := secret.Annotations[annotationRotationGeneration]
 	if gen == "" || !metav1.IsControlledBy(&secret, r.claim) ||
-		secret.Annotations[annotationRotationSequence] != strconv.FormatInt(rs.Sequence+1, 10) {
+		secret.Annotations[AnnotationRotationSequence] != strconv.FormatInt(rs.Sequence+1, 10) {
 		return "", false, nil
 	}
 	return Generation(gen), true, nil
@@ -209,7 +216,7 @@ func (r *run[S, O]) markIssued(sequence int64, gen Generation) error {
 	orig := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: r.claim.GetNamespace(), Name: r.claim.GetBindingSecretName()}}
 	marked := orig.DeepCopy()
 	marked.Annotations = map[string]string{
-		annotationRotationSequence:   strconv.FormatInt(sequence, 10),
+		AnnotationRotationSequence:   strconv.FormatInt(sequence, 10),
 		annotationRotationGeneration: string(gen),
 	}
 	return r.c.Patch(r.ctx, marked, client.MergeFrom(orig))
