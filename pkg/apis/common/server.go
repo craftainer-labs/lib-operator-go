@@ -236,4 +236,48 @@ type ServerStatus struct {
 	// LastProbeTime is when the server was last probed.
 	// +optional
 	LastProbeTime *metav1.Time `json:"lastProbeTime,omitempty"`
+	// Discovered is what the operator read from the cloud for a cloud server:
+	// endpoint, port, resourceId, accountId and region (ADR 0002, section
+	// 16.1). The probe (a cloud Prober of package probe) or the operator's
+	// controller fills it; claims read it from the cached server. A
+	// self-hosted server leaves it empty.
+	//
+	// +kubebuilder:validation:MaxProperties=10
+	// +kubebuilder:validation:XValidation:rule="self.all(k, size(self[k]) <= 512)",message="values are at most 512 characters"
+	// +optional
+	Discovered map[string]string `json:"discovered,omitempty"`
+}
+
+// CloudServerCommon is the spec a cloud-capable server kind embeds in place of
+// ServerCommon when it can run with no admin Secret: the same fields, with
+// AdminCredentialsSecretRef optional. A server whose data-plane login is not a
+// Secret (an S3, MQTT, cache or OIDC server with a provider, or a database
+// server with adminAuthMode IAM) leaves it unset. The operator's own spec adds
+// the rest of ADR 0002, section 16.1 next to it: provider (its blocks carry
+// the operator's target fields) and credentials (cloud.Credentials on a
+// cluster kind, cloud.NamespacedCredentials on a namespaced one), plus the CEL
+// that ties them to AdminCredentialsSecretRef. Pass the server to
+// server.ResolveCloud and server.ConnectionForCloud.
+type CloudServerCommon struct {
+	// TLS configures verification of the backend.
+	// +optional
+	TLS *TLS `json:"tls,omitempty"`
+	// AdminCredentialsSecretRef names the data-plane admin credentials. Unset
+	// on a server that logs in with its cloud identity.
+	// +optional
+	AdminCredentialsSecretRef *AdminSecretRef `json:"adminCredentialsSecretRef,omitempty"`
+	// ProxyURL is an http, https or socks5 proxy; unset uses the process
+	// environment.
+	//
+	// +kubebuilder:validation:MaxLength=512
+	// +optional
+	ProxyURL string `json:"proxyURL,omitempty"`
+	// HealthCheckInterval is how often the server is probed (default 1m,
+	// minimum 10s, maximum 1h).
+	//
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('10s') && duration(self) <= duration('1h')",message="healthCheckInterval must be between 10s and 1h"
+	// +optional
+	HealthCheckInterval *metav1.Duration `json:"healthCheckInterval,omitempty"`
 }

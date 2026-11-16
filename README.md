@@ -20,11 +20,11 @@ in [`docs/crd-drafts.md`](docs/crd-drafts.md). The FIPS CI job and the
 
 | Package | Purpose |
 | --- | --- |
-| `pkg/apis/common` | Shared API types: conditions, references, management policies, selectors |
+| `pkg/apis/common` | Shared API types: conditions, references, management policies, selectors; `CloudServerCommon` (a server spec whose admin Secret is optional) and `ServerStatus.Discovered` for cloud servers |
 | `pkg/lifecycle` | `External`, `Rotator` and `Claim` interfaces and `Reconcile`, delete and rotation handling; `PendingError` for a backend that is still changing state |
 | `pkg/lifecycle/lifecycletest` | Fakes for testing operators built on `pkg/lifecycle` |
-| `pkg/server` | `Resolve`: server lookup that enforces `allowedNamespaces`; `ConnectionFor`: a server's own connection settings |
-| `pkg/probe` | `Prober` and `Reconciler`: write a server kind's `ServerStatus` (version, probe time, `Ready`, `ServerReachable`) |
+| `pkg/server` | `Resolve`: server lookup that enforces `allowedNamespaces`; `ConnectionFor`: a server's own connection settings; `ResolveCloud` and `ConnectionForCloud`: the same for a cloud server that may have no admin Secret, plus its cloud credentials Secret |
+| `pkg/probe` | `Prober` and `Reconciler`: write a server kind's `ServerStatus` (version, probe time, `Ready`, `ServerReachable`); `CloudProber` for a cloud server with no admin Secret, which also fills `discovered` |
 | `pkg/egress` | `Policy`, `Dialer` and `HostDialer`: block backend connections to loopback, link-local, metadata, special-purpose (and in `strict` mode private) addresses after name resolution, through an optional proxy, with a bounded tunnel set-up |
 | `pkg/cloud` | Cloud providers (AWS, GCP, Azure): the API types operators embed, credential resolution (workload identity or Secret), `endpointOverride` gated on the egress mode, SDK HTTP clients that dial through `pkg/egress`, and token sources for IAM logins (RDS, Entra, Memorystore) |
 | `pkg/binding` | `WriteSecret`: `servicebinding.io/<type>` Secrets |

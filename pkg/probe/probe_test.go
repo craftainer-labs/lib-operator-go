@@ -71,13 +71,16 @@ func mapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{testapi.GroupVersion})
 	m.Add(testapi.GroupVersion.WithKind("ClusterWidgetServer"), meta.RESTScopeRoot)
 	m.Add(testapi.GroupVersion.WithKind("WidgetServer"), meta.RESTScopeNamespace)
+	m.Add(testapi.GroupVersion.WithKind("ClusterCloudWidgetServer"), meta.RESTScopeRoot)
+	m.Add(testapi.GroupVersion.WithKind("CloudWidgetServer"), meta.RESTScopeNamespace)
 	return m
 }
 
 func newClient(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(scheme(t)).WithRESTMapper(mapper()).
-		WithStatusSubresource(&testapi.ClusterWidgetServer{}, &testapi.WidgetServer{}).
+		WithStatusSubresource(&testapi.ClusterWidgetServer{}, &testapi.WidgetServer{},
+			&testapi.ClusterCloudWidgetServer{}, &testapi.CloudWidgetServer{}).
 		WithInterceptorFuncs(funcs).WithObjects(objs...).Build()
 }
 

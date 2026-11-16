@@ -274,6 +274,20 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              discovered:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Discovered is what the operator read from the cloud for a cloud server:
+                  endpoint, port, resourceId, accountId and region (ADR 0002, section
+                  16.1). The probe (a cloud Prober of package probe) or the operator's
+                  controller fills it; claims read it from the cached server. A
+                  self-hosted server leaves it empty.
+                maxProperties: 10
+                type: object
+                x-kubernetes-validations:
+                - message: values are at most 512 characters
+                  rule: self.all(k, size(self[k]) <= 512)
               lastProbeTime:
                 description: LastProbeTime is when the server was last probed.
                 format: date-time

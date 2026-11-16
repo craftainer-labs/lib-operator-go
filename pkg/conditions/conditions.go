@@ -52,6 +52,14 @@ const (
 	// cannot be read (missing Secret, invalid proxy or CA reference, operator
 	// namespace unset): a configuration problem, not a transient failure.
 	InvalidServer = "InvalidServer"
+	// CredentialsNamespaceForbidden is the reason of a cloud server whose
+	// credentials Secret is in a namespace it may not use (ADR 0002, section
+	// 16.1).
+	CredentialsNamespaceForbidden = "CredentialsNamespaceForbidden"
+	// CredentialsUnavailable is the reason of a cloud server whose credentials
+	// Secret does not exist (ADR 0002, section 16.1). An operator also uses it
+	// when no workload identity is injected or the Secret is malformed.
+	CredentialsUnavailable = "CredentialsUnavailable"
 )
 
 // Event reasons that are not condition reasons (ADR 0002, section 11). The

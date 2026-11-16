@@ -41,6 +41,8 @@ func mapper() meta.RESTMapper {
 	m := meta.NewDefaultRESTMapper([]schema.GroupVersion{testapi.GroupVersion})
 	m.Add(testapi.GroupVersion.WithKind("ClusterWidgetServer"), meta.RESTScopeRoot)
 	m.Add(testapi.GroupVersion.WithKind("WidgetServer"), meta.RESTScopeNamespace)
+	m.Add(testapi.GroupVersion.WithKind("ClusterCloudWidgetServer"), meta.RESTScopeRoot)
+	m.Add(testapi.GroupVersion.WithKind("CloudWidgetServer"), meta.RESTScopeNamespace)
 	return m
 }
 

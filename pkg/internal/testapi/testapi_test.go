@@ -136,3 +136,57 @@ func TestServerAccessors(t *testing.T) {
 		t.Errorf("namespaced server = %+v", ns)
 	}
 }
+
+var (
+	_ server.CloudServer = (*testapi.ClusterCloudWidgetServer)(nil)
+	_ server.CloudServer = (*testapi.CloudWidgetServer)(nil)
+)
+
+func TestCloudKindsCopyThemselvesAndExposeTheirSettings(t *testing.T) {
+	ref := &common.AdminSecretRef{Name: "creds", Namespace: "ns"}
+	cluster := &testapi.ClusterCloudWidgetServer{}
+	cluster.Spec.Endpoint = "https://x"
+	cluster.Spec.CredentialsSecret = ref
+	cluster.Spec.AllowedNamespaces = common.AllowedNamespaces{From: common.NamespacesAll}
+	cluster.Spec.AdminCredentialsSecretRef = ref
+	cluster.Status.Discovered = map[string]string{"a": "b"}
+	cp := cluster.DeepCopyObject().(*testapi.ClusterCloudWidgetServer)
+	cp.Spec.CredentialsSecret.Name = "changed"
+	cp.Spec.AdminCredentialsSecretRef.Name = "changed"
+	cp.Status.Discovered["a"] = "changed"
+	if ref.Name != "creds" || cluster.Status.Discovered["a"] != "b" {
+		t.Error("the copy shares memory with the original")
+	}
+	if name, ns := cluster.GetCredentialsSecret(); name != "creds" || ns != "ns" ||
+		cluster.GetEndpoint() != "https://x" || cluster.GetAllowedNamespaces().From != common.NamespacesAll ||
+		cluster.GetCloudCommon() != &cluster.Spec.CloudServerCommon || cluster.GetServerStatus() != &cluster.Status {
+		t.Error("cluster getters")
+	}
+
+	team := &testapi.CloudWidgetServer{}
+	team.Spec.Endpoint = "https://y"
+	team.Spec.CredentialsSecret = ref
+	team.Status.Discovered = map[string]string{"a": "b"}
+	tcp := team.DeepCopyObject().(*testapi.CloudWidgetServer)
+	tcp.Spec.CredentialsSecret.Name = "changed"
+	tcp.Status.Discovered["a"] = "changed"
+	if ref.Name != "creds" || team.Status.Discovered["a"] != "b" {
+		t.Error("the copy shares memory with the original")
+	}
+	if name, ns := team.GetCredentialsSecret(); name != "creds" || ns != "ns" || team.GetEndpoint() != "https://y" ||
+		team.GetAllowedNamespaces() != nil || team.GetCloudCommon() != &team.Spec.CloudServerCommon || team.GetServerStatus() != &team.Status {
+		t.Error("namespaced getters")
+	}
+	if name, ns := (&testapi.CloudWidgetServer{}).GetCredentialsSecret(); name != "" || ns != "" {
+		t.Error("no credentials Secret")
+	}
+
+	cl := &testapi.ClusterCloudWidgetServerList{Items: []testapi.ClusterCloudWidgetServer{*cluster}}
+	if got := cl.DeepCopyObject().(*testapi.ClusterCloudWidgetServerList); len(got.Items) != 1 || got.Items[0].Spec.Endpoint != "https://x" {
+		t.Error("cluster list copy")
+	}
+	tl := &testapi.CloudWidgetServerList{Items: []testapi.CloudWidgetServer{*team}}
+	if got := tl.DeepCopyObject().(*testapi.CloudWidgetServerList); len(got.Items) != 1 || got.Items[0].Spec.Endpoint != "https://y" {
+		t.Error("list copy")
+	}
+}
