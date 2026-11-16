@@ -113,7 +113,8 @@ func (r *run[S, O]) due(policy *common.RotationPolicy, rs common.RotationStatus,
 // status.rotation.sequence while that status write is pending (or failed, until
 // the next reconcile adopts it); once recorded it equals the status. Operators
 // may read it, for example to tell which rotation the Secret they see belongs
-// to; only the lifecycle writes it.
+// to. Operators must not write it: the lifecycle trusts it when it adopts an
+// issued rotation.
 const AnnotationRotationSequence = "craftainer.dev/rotation-sequence"
 
 // The generation annotation of the binding Secret. It is written together with
