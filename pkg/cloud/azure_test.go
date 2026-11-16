@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	azcloud "github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
+
 	"github.com/craftainer-labs/lib-operator-go/pkg/egress"
 )
 
@@ -89,7 +91,7 @@ func TestAzureWorkloadIdentity(t *testing.T) {
 
 	// Without an override nothing is fetched at construction.
 	plain, err := openEgress().Azure(t.Context(), ScopeCluster, AzureClusterBlock{AzureBlock: AzureBlock{TenantID: testTenant}}, nil, nil)
-	if err != nil || plain.Endpoint != "" || plain.ClientOptions.Cloud.ActiveDirectoryAuthorityHost != "" {
+	if err != nil || plain.Endpoint != "" || plain.ClientOptions.Cloud.ActiveDirectoryAuthorityHost != azcloud.AzurePublic.ActiveDirectoryAuthorityHost {
 		t.Fatalf("Azure = %+v, %v", plain, err)
 	}
 

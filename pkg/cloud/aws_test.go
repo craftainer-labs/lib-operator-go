@@ -186,6 +186,12 @@ func TestRDSTokenSource(t *testing.T) {
 	if _, exp, err := RDSTokenSource(short, "db.example.test:5432", "app_role").Token(t.Context()); err != nil || !exp.Equal(soon) {
 		t.Errorf("expiry = %v, %v; want %v", exp, err, soon)
 	}
+	expired := aws.Config{Region: "eu-west-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		return aws.Credentials{AccessKeyID: "ASIAFAKE", SecretAccessKey: "fake-secret-key", CanExpire: true, Expires: time.Now().Add(-time.Minute)}, nil
+	})}
+	if _, _, err := RDSTokenSource(expired, "db.example.test:5432", "app_role").Token(t.Context()); !errors.Is(err, ErrCredentialsUnavailable) {
+		t.Errorf("expired credentials: %v", err)
+	}
 	failing := aws.Config{Region: "eu-west-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
 		return aws.Credentials{}, errors.New("LEAK-CHECK")
 	})}

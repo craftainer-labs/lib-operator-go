@@ -212,3 +212,21 @@ func TestGCPBadPrivateKeyIsACategoryError(t *testing.T) {
 	}
 	noSecret(t, err, "LEAK-CHECK")
 }
+
+// A redirect to another host does not carry the access token there.
+func TestGCPRedirectDoesNotLeakTheToken(t *testing.T) {
+	oauth, _ := fakeGoogleOAuth(t, "Bearer")
+	target, targetHits := newServer(t, func(http.ResponseWriter, *http.Request) {})
+	api, _ := newServer(t, func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, http.StatusFound) })
+	c, err := openEgress().GCP(t.Context(), ScopeCluster, GCPClusterBlock{}, gcpCreds, gcpSecret(serviceAccountJSON(t, oauth)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, api.URL, nil)
+	if err := doErr(c.HTTPClient, req); !errors.Is(err, errRedirectRefused) {
+		t.Errorf("Do = %v", err)
+	}
+	if targetHits.count() != 0 || targetHits.authorization() != "" {
+		t.Errorf("the redirect target saw %d requests, Authorization %q", targetHits.count(), targetHits.authorization())
+	}
+}

@@ -101,14 +101,19 @@ func RDSTokenSource(cfg aws.Config, endpoint, user string) TokenSource {
 		if err != nil {
 			return "", time.Time{}, fmt.Errorf("%w: AWS credentials could not be retrieved", ErrCredentialsUnavailable)
 		}
-		tok, err := rdsauth.BuildAuthToken(ctx, endpoint, cfg.Region, user, cfg.Credentials)
+		tok, err := rdsauth.BuildAuthToken(ctx, endpoint, cfg.Region, user,
+			aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) { return creds, nil }))
 		if err != nil {
 			return "", time.Time{}, fmt.Errorf("%w: the RDS IAM token could not be built", ErrCredentialsUnavailable)
 		}
-		// The signature stops validating when the credentials that made it expire.
+		// The token was signed with creds, the ones fetched above, and stops
+		// validating when they expire.
 		exp := issued.Add(RDSTokenLifetime)
 		if creds.CanExpire && creds.Expires.Before(exp) {
 			exp = creds.Expires
+		}
+		if !exp.After(issued) {
+			return "", time.Time{}, fmt.Errorf("%w: the AWS credentials have expired", ErrCredentialsUnavailable)
 		}
 		return tok, exp, nil
 	})

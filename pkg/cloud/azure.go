@@ -49,7 +49,7 @@ func (e Egress) Azure(_ context.Context, scope Scope, p AzureClusterBlock, c *Cr
 	if err != nil {
 		return nil, err
 	}
-	if endpoint != "" && !strings.HasPrefix(endpoint, "https://") {
+	if endpoint != "" && !strings.HasPrefix(strings.ToLower(endpoint), "https://") {
 		return nil, fmt.Errorf("%w: the Entra authority must be https", ErrInvalidEndpoint)
 	}
 	src, err := source(scope, c)
@@ -60,7 +60,9 @@ func (e Egress) Azure(_ context.Context, scope Scope, p AzureClusterBlock, c *Cr
 	if err != nil {
 		return nil, err
 	}
-	co := azcore.ClientOptions{Transport: hc}
+	// An explicit cloud also keeps AZURE_AUTHORITY_HOST from choosing the
+	// authority; sovereign clouds are out of v1alpha1 (ADR 0002, 16.8).
+	co := azcore.ClientOptions{Transport: hc, Cloud: azcloud.AzurePublic}
 	if endpoint != "" {
 		co.Cloud = azcloud.Configuration{ActiveDirectoryAuthorityHost: endpoint}
 	}
