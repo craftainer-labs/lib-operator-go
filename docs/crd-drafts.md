@@ -567,7 +567,16 @@ kinds above are unchanged when `spec.provider` is absent.
 
 ### `CloudServerCommon` (every server kind of a cloud-capable group)
 
-Added to `ServerCommon`; cluster and namespaced kinds alike.
+Added to `ServerCommon`; cluster and namespaced kinds alike. In the library
+(`pkg/apis/common`), `CloudServerCommon` is `ServerCommon` with an optional
+`adminCredentialsSecretRef`: a cloud-capable kind embeds it in place of
+`ServerCommon`, and `server.ResolveCloud`, `server.ConnectionForCloud` and a
+`probe.CloudProber` read it. `provider` and `credentials` below are fields of the
+operator's own spec (the provider blocks carry its target fields; `pkg/cloud`
+has the types, with `cloud.Credentials` for a cluster kind and
+`cloud.NamespacedCredentials` for a namespaced one), and the kind implements
+`GetCredentialsSecret()` to hand `credentials.secretRef` to the library.
+`status.discovered` is `common.ServerStatus.Discovered`.
 
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |

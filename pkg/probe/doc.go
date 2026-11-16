@@ -24,6 +24,13 @@
 // server costs no write per probe; see Options.RefreshInterval for
 // lastProbeTime.
 //
+// A cloud server has no admin Secret to build a server.Connection from, and
+// its probe also reads what the cloud knows (an endpoint, a resource id). Such
+// a kind embeds common.CloudServerCommon and implements server.CloudServer;
+// the operator implements CloudProber and sets Reconciler.NewCloud and
+// Reconciler.CloudProber instead of New and Prober. The helper then writes
+// ServerStatus.Discovered with the version. An existing Prober is untouched.
+//
 // Conditions carry fixed, coarse messages. The raw error of a failed probe
 // goes to the controller's log, never into the status, where any user who can
 // read the server would see it.

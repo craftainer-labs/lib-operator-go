@@ -143,17 +143,36 @@ func WithHealthCheckInterval(def time.Duration) Option {
 // nothing. The admin Secret and the CA bundle are read from the operator
 // namespace (cluster server) or the claim's namespace (namespaced server).
 func Resolve(ctx context.Context, c client.Client, claimNS string, ref Ref, opts ...Option) (Connection, error) {
-	var cfg config
-	for _, o := range opts {
-		o(&cfg)
-	}
-	srv, err := newServer(c.Scheme(), ref.Kind)
+	cfg := newConfig(opts)
+	srv, secretNS, err := find[Server](ctx, c, claimNS, ref, cfg)
 	if err != nil {
 		return Connection{}, err
 	}
+	cm := srv.GetCommon()
+	return connection(ctx, c, secretNS, cfg, connSpec{
+		endpoint: srv.GetEndpoint(), tls: cm.TLS, proxyURL: cm.ProxyURL,
+		interval: cm.HealthCheckInterval, admin: &cm.AdminCredentialsSecretRef,
+	})
+}
+
+// lookup is what find needs of a server object: both Server and CloudServer.
+type lookup interface {
+	client.Object
+	GetAllowedNamespaces() *common.AllowedNamespaces
+}
+
+// find reads the server ref names, for a claim in claimNS, and returns it with
+// the namespace its Secrets and ConfigMaps come from. It enforces
+// allowedNamespaces, for Resolve and ResolveCloud alike.
+func find[T lookup](ctx context.Context, c client.Client, claimNS string, ref Ref, cfg config) (T, string, error) {
+	var zero T
+	srv, err := newServerOf[T](c.Scheme(), ref.Kind)
+	if err != nil {
+		return zero, "", err
+	}
 	namespaced, err := c.IsObjectNamespaced(srv)
 	if err != nil {
-		return Connection{}, fmt.Errorf("server kind %q: %w", ref.Kind, err)
+		return zero, "", fmt.Errorf("server kind %q: %w", ref.Kind, err)
 	}
 	key := types.NamespacedName{Name: ref.Name}
 	var secretNS string
@@ -162,19 +181,27 @@ func Resolve(ctx context.Context, c client.Client, claimNS string, ref Ref, opts
 	}
 	if err := c.Get(ctx, key, srv); err != nil {
 		if apierrors.IsNotFound(err) {
-			return Connection{}, fmt.Errorf("%w: %s %q", ErrServerNotFound, ref.Kind, ref.Name)
+			return zero, "", fmt.Errorf("%w: %s %q", ErrServerNotFound, ref.Kind, ref.Name)
 		}
-		return Connection{}, fmt.Errorf("get %s %q: %w", ref.Kind, ref.Name, err)
+		return zero, "", fmt.Errorf("get %s %q: %w", ref.Kind, ref.Name, err)
 	}
 	if !namespaced {
 		if err := checkNamespace(ctx, c, claimNS, srv.GetAllowedNamespaces()); err != nil {
-			return Connection{}, err
+			return zero, "", err
 		}
 		if secretNS, err = cfg.operatorNS(); err != nil {
-			return Connection{}, err
+			return zero, "", err
 		}
 	}
-	return connection(ctx, c, srv, secretNS, cfg)
+	return srv, secretNS, nil
+}
+
+func newConfig(opts []Option) config {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
+	return cfg
 }
 
 // ConnectionFor returns the connection settings of srv itself, an already read
@@ -186,31 +213,36 @@ func Resolve(ctx context.Context, c client.Client, claimNS string, ref Ref, opts
 // namespace is ErrInvalidServer. On an error the Connection is empty except for
 // HealthCheckInterval, so a caller can still schedule its next attempt.
 func ConnectionFor(ctx context.Context, c client.Client, srv Server, opts ...Option) (Connection, error) {
-	var cfg config
-	for _, o := range opts {
-		o(&cfg)
-	}
-	conn, err := connectionFor(ctx, c, srv, cfg)
+	cfg := newConfig(opts)
+	cm := srv.GetCommon()
 	// Set even on an error, so a caller can still schedule its next attempt.
-	conn.HealthCheckInterval = healthCheckInterval(srv.GetCommon().HealthCheckInterval, cfg.interval())
+	interval := healthCheckInterval(cm.HealthCheckInterval, cfg.interval())
+	secretNS, err := ownNamespace(c, srv, cfg)
+	if err != nil {
+		return Connection{HealthCheckInterval: interval}, err
+	}
+	conn, err := connection(ctx, c, secretNS, cfg, connSpec{
+		endpoint: srv.GetEndpoint(), tls: cm.TLS, proxyURL: cm.ProxyURL,
+		interval: cm.HealthCheckInterval, admin: &cm.AdminCredentialsSecretRef,
+	})
+	conn.HealthCheckInterval = interval
 	return conn, err
 }
 
-func connectionFor(ctx context.Context, c client.Client, srv Server, cfg config) (Connection, error) {
+// ownNamespace returns the namespace the Secrets and ConfigMaps of the already
+// read server srv come from: its own, or the operator's for a cluster server.
+func ownNamespace(c client.Client, srv client.Object, cfg config) (string, error) {
 	namespaced, err := c.IsObjectNamespaced(srv)
 	if err != nil {
-		return Connection{}, fmt.Errorf("server %q: %w", srv.GetName(), err)
+		return "", fmt.Errorf("server %q: %w", srv.GetName(), err)
 	}
-	secretNS := srv.GetNamespace()
-	if namespaced && secretNS == "" {
-		return Connection{}, fmt.Errorf("%w: namespaced server %q has no namespace", ErrInvalidServer, srv.GetName())
-	}
-	if !namespaced {
-		if secretNS, err = cfg.operatorNS(); err != nil {
-			return Connection{}, err
+	if namespaced {
+		if srv.GetNamespace() == "" {
+			return "", fmt.Errorf("%w: namespaced server %q has no namespace", ErrInvalidServer, srv.GetName())
 		}
+		return srv.GetNamespace(), nil
 	}
-	return connection(ctx, c, srv, secretNS, cfg)
+	return cfg.operatorNS()
 }
 
 // serverTypes caches which registered type serves a kind, so Resolve does not
@@ -230,10 +262,20 @@ type serverTypeKey struct {
 // (v1 over v1beta2 over v1alpha1, and v1beta10 over v1beta2), never by string
 // order; an operator registers one version.
 func newServer(s *runtime.Scheme, kind string) (Server, error) {
+	return newServerOf[Server](s, kind)
+}
+
+// newServerOf is newServer for any interface T a server type implements.
+func newServerOf[T any](s *runtime.Scheme, kind string) (T, error) {
+	var zero T
 	key := serverTypeKey{s, kind}
+	if _, isServer := any(&zero).(*Server); !isServer {
+		// A kind that is both a Server and a CloudServer is cached once for each.
+		key.kind += "|" + fmt.Sprintf("%T", &zero)
+	}
 	if gvk, ok := serverTypes.Load(key); ok {
 		obj, _ := s.New(gvk.(schema.GroupVersionKind))
-		return obj.(Server), nil
+		return obj.(T), nil
 	}
 	var gvks []schema.GroupVersionKind
 	for gvk := range s.AllKnownTypes() {
@@ -241,20 +283,20 @@ func newServer(s *runtime.Scheme, kind string) (Server, error) {
 			continue
 		}
 		if obj, err := s.New(gvk); err == nil {
-			if _, ok := obj.(Server); ok {
+			if _, ok := obj.(T); ok {
 				gvks = append(gvks, gvk)
 			}
 		}
 	}
 	if len(gvks) == 0 {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownServerKind, kind)
+		return zero, fmt.Errorf("%w: %q", ErrUnknownServerKind, kind)
 	}
 	latest := slices.MaxFunc(gvks, func(a, b schema.GroupVersionKind) int {
 		return cmp.Or(cmp.Compare(a.Group, b.Group), version.CompareKubeAwareVersionStrings(a.Version, b.Version))
 	})
 	serverTypes.Store(key, latest)
 	obj, _ := s.New(latest)
-	return obj.(Server), nil
+	return obj.(T), nil
 }
 
 func checkNamespace(ctx context.Context, c client.Client, claimNS string, allowed *common.AllowedNamespaces) error {
@@ -273,43 +315,55 @@ func checkNamespace(ctx context.Context, c client.Client, claimNS string, allowe
 	return nil
 }
 
-func connection(ctx context.Context, c client.Client, srv Server, secretNS string, cfg config) (Connection, error) {
-	cm := srv.GetCommon()
-	ref := cm.AdminCredentialsSecretRef
-	if ref.Namespace != "" && ref.Namespace != secretNS {
-		return Connection{}, fmt.Errorf("%w: %q, want %q", ErrAdminSecretNamespaceForbidden, ref.Namespace, secretNS)
-	}
-	admin, err := secretData(ctx, c, secretNS, ref.Name)
-	if err != nil {
-		return Connection{}, err
-	}
-	if ref.Key != "" {
-		v, ok := admin[ref.Key]
-		if !ok {
-			return Connection{}, fmt.Errorf("%w: admin secret %q has no key %q", ErrInvalidServer, ref.Name, ref.Key)
-		}
-		admin = map[string][]byte{ref.Key: v}
-	}
+// connSpec is what connection reads of a server, whichever kind of server it
+// is: the Server and the CloudServer fields that name a backend.
+type connSpec struct {
+	endpoint string
+	tls      *common.TLS
+	proxyURL string
+	interval *metav1.Duration
+	// admin is nil for a cloud server with no adminCredentialsSecretRef.
+	admin *common.AdminSecretRef
+}
+
+func connection(ctx context.Context, c client.Client, secretNS string, cfg config, sp connSpec) (Connection, error) {
 	out := Connection{
-		Endpoint:            srv.GetEndpoint(),
-		Admin:               admin,
+		Endpoint:            sp.endpoint,
 		MinTLSVersion:       tls.VersionTLS12,
-		HealthCheckInterval: healthCheckInterval(cm.HealthCheckInterval, cfg.interval()),
+		HealthCheckInterval: healthCheckInterval(sp.interval, cfg.interval()),
 	}
-	if cm.TLS != nil {
-		out.ServerName = cm.TLS.ServerName
-		switch cm.TLS.MinVersion {
+	if ref := sp.admin; ref != nil {
+		if ref.Namespace != "" && ref.Namespace != secretNS {
+			return Connection{}, fmt.Errorf("%w: %q, want %q", ErrAdminSecretNamespaceForbidden, ref.Namespace, secretNS)
+		}
+		admin, err := secretData(ctx, c, secretNS, ref.Name)
+		if err != nil {
+			return Connection{}, err
+		}
+		if ref.Key != "" {
+			v, ok := admin[ref.Key]
+			if !ok {
+				return Connection{}, fmt.Errorf("%w: admin secret %q has no key %q", ErrInvalidServer, ref.Name, ref.Key)
+			}
+			admin = map[string][]byte{ref.Key: v}
+		}
+		out.Admin = admin
+	}
+	var err error
+	if sp.tls != nil {
+		out.ServerName = sp.tls.ServerName
+		switch sp.tls.MinVersion {
 		case "", common.TLS12:
 		case common.TLS13:
 			out.MinTLSVersion = tls.VersionTLS13
 		default:
-			return Connection{}, fmt.Errorf("%w: tls.minVersion %q", ErrInvalidServer, cm.TLS.MinVersion)
+			return Connection{}, fmt.Errorf("%w: tls.minVersion %q", ErrInvalidServer, sp.tls.MinVersion)
 		}
-		if out.CABundle, err = caBundle(ctx, c, secretNS, cm.TLS.CABundle); err != nil {
+		if out.CABundle, err = caBundle(ctx, c, secretNS, sp.tls.CABundle); err != nil {
 			return Connection{}, err
 		}
 	}
-	if out.Proxy, err = proxy(cm.ProxyURL); err != nil {
+	if out.Proxy, err = proxy(sp.proxyURL); err != nil {
 		return Connection{}, err
 	}
 	return out, nil

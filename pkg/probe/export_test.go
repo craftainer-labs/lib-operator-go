@@ -24,13 +24,23 @@ func (r *Reconciler) ProbeServer(ctx context.Context, srv Server) (ctrl.Result, 
 
 // Dependents returns the servers that use obj, a Secret or a ConfigMap.
 func (r *Reconciler) Dependents(ctx context.Context, obj client.Object) ([]reconcile.Request, error) {
-	newList, err := listFor(r.Client.Scheme(), r.New())
+	var kind client.Object
+	_, isSecret := obj.(*corev1.Secret)
+	var uses func(client.Object, client.Object) bool
+	if r.NewCloud != nil {
+		kind, uses = r.NewCloud(), cloudUses(usesCloudConfigMap)
+		if isSecret {
+			uses = cloudUses(usesCloudSecret)
+		}
+	} else {
+		kind, uses = r.New(), serverUses(usesConfigMap)
+		if isSecret {
+			uses = serverUses(usesSecret)
+		}
+	}
+	newList, err := listFor(r.Client.Scheme(), kind)
 	if err != nil {
 		return nil, err
-	}
-	uses := usesConfigMap
-	if _, ok := obj.(*corev1.Secret); ok {
-		uses = usesSecret
 	}
 	return r.dependents(ctx, newList(), obj, uses), nil
 }
@@ -43,3 +53,15 @@ func ListFor(s *runtime.Scheme, obj Server) error {
 
 // PredicatesForTest returns the event filter of the server watch.
 func PredicatesForTest() predicate.Predicate { return predicates() }
+
+// ProbeCloudServer probes srv, an already read cloud server.
+func (r *Reconciler) ProbeCloudServer(ctx context.Context, srv CloudServer) (ctrl.Result, error) {
+	return r.probeCloudServer(ctx, srv)
+}
+
+// CloudUsesForTest and ServerUsesForTest run the adapters of dependents on any
+// object.
+func CloudUsesForTest(srv, obj client.Object) bool { return cloudUses(usesCloudSecret)(srv, obj) }
+
+// ServerUsesForTest is CloudUsesForTest for a Server.
+func ServerUsesForTest(srv, obj client.Object) bool { return serverUses(usesSecret)(srv, obj) }

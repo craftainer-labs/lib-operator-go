@@ -260,3 +260,32 @@ func TestSetupWithManagerNeedsTheKindInTheScheme(t *testing.T) {
 		t.Error("a kind outside the scheme was accepted")
 	}
 }
+
+// A cloud kind is registered like any other: the controller is built from
+// NewCloud, with no New. The kind has no CRD here, so the manager is not
+// started; the registration is what this checks.
+func TestSetupWithManagerOfACloudKind(t *testing.T) {
+	skip := true
+	mgr, err := ctrl.NewManager(env.Config, ctrl.Options{
+		Scheme:     env.Scheme,
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Controller: config.Controller{SkipNameValidation: &skip},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &probe.Reconciler{
+		Client:   mgr.GetClient(),
+		NewCloud: func() probe.CloudServer { return &testapi.CloudWidgetServer{} },
+		CloudProber: probe.CloudProberFunc(func(context.Context, server.CloudServer, server.CloudConnection) (probe.CloudResult, error) {
+			return probe.CloudResult{}, nil
+		}),
+	}
+	if err := r.SetupWithManager(mgr); err != nil {
+		t.Error(err)
+	}
+	cluster := &probe.Reconciler{Client: mgr.GetClient(), NewCloud: func() probe.CloudServer { return &testapi.ClusterCloudWidgetServer{} }}
+	if err := cluster.SetupWithManager(mgr); err != nil {
+		t.Error(err)
+	}
+}

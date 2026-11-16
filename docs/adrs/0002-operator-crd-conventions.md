@@ -10,7 +10,7 @@ NO1b's implementation merged, as `docs/adrs/README.md` requires.
 
 Section 16 (cloud providers) is a later addition. The user decided its eleven
 questions on 2026-11-16 (16.8). It is **Accepted for the parts NK0 implements**
-in `pkg/cloud` and `pkg/lifecycle` (16.9 lists them) and stays **Proposed** for
+in `pkg/cloud`, `pkg/lifecycle`, `pkg/server` and `pkg/probe` (16.9 lists them) and stays **Proposed** for
 the rest, which the operators' NK items implement, as `docs/adrs/README.md`
 requires.
 
@@ -1317,7 +1317,7 @@ authentication], [ElastiCache RBAC], [Memorystore ACL policies], [AWS IoT
 
 #### 16.9 Implementation (NK0, lib-operator-go)
 
-Accepted, implemented in the library:
+Accepted, implemented in the library (NK0):
 
 - `pkg/cloud` types, with the markers and CEL of 16.1 to 16.3: `ProviderType`
   (immutable), `CredentialsSource`, `SecretRef`, `Credentials` and
@@ -1364,13 +1364,43 @@ Deviations from the text above, found while implementing:
   requires to be https) and is handed back for the operator's own service
   client; on GCP and AWS it is the API endpoint.
 
+Implemented afterwards (NKlib-1, additive: no exported type or signature of
+the earlier releases changed):
+
+- `common.CloudServerCommon`: `ServerCommon` with an optional
+  `adminCredentialsSecretRef` (a pointer). It holds only the shared connection
+  settings. `provider` and `credentials` stay in the operator's own spec,
+  because the provider blocks carry the operator's target fields and a cluster
+  kind and a namespaced kind use different credentials types
+  (`cloud.Credentials`, `cloud.NamespacedCredentials`). The self-hosted
+  `ServerCommon` is unchanged.
+- `common.ServerStatus.Discovered` (`status.discovered`, `maxProperties` 10,
+  values at most 512 characters by CEL), optional.
+- `server.CloudServer`, `server.ResolveCloud`, `server.ConnectionForCloud` and
+  `server.CloudConnection`: `Resolve` and `ConnectionFor` for a server that may
+  have no admin Secret. The admin Secret is read only when the reference is
+  set (`Admin` is empty otherwise), `allowedNamespaces` is enforced by the same
+  code as `Resolve`, and the data of the credentials Secret is returned in
+  `CloudConnection.Credentials`, ready for `cloud.Egress`. The credentials
+  Secret must be in the operator namespace (cluster server) or the server's
+  own (namespaced), else `ErrCredentialsSecretNamespaceForbidden`; a missing
+  one is `ErrCredentialsUnavailable`.
+- `probe.CloudProber`, `probe.CloudResult`, `probe.CloudServer` and the
+  `Reconciler` fields `NewCloud` and `CloudProber`: the probe of a server with
+  no admin Secret. It writes `status.discovered` with the version in the same
+  merge patch, bounded to the schema (ten entries, 512 bytes a value), and
+  keeps the last known values when a probe fails. Existing `Prober`s work
+  unchanged and never touch `discovered`.
+- The condition reasons `conditions.CredentialsNamespaceForbidden` and
+  `conditions.CredentialsUnavailable`.
+
 Not implemented here, left to the operators' NK items:
 
 - The operators' own CRD types, the cross-field CEL of the server spec
-  (the `provider` union, `credentials` only with `provider`), the new condition
-  and Event reasons, `status.discovered`, the binding keys of 16.5 and the
-  probe. The controller must read the credentials Secret itself and refuse a
-  namespace other than the operator's (`CredentialsNamespaceForbidden`).
+  (the `provider` union, `credentials` only with `provider`), the remaining new
+  condition and Event reasons (`TargetNotFound`, `EndpointOverrideForbidden`
+  and the claim reasons), and the binding keys of 16.5. The operators'
+  `CloudProber` reads `provider` and fills `discovered`.
 - IAM tokens for ElastiCache and MemoryDB (a SigV4-presigned request), and the
   Cloud SQL connector, which refreshes its own token; operator-db and
   operator-cache add them.

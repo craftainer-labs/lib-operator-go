@@ -34,7 +34,8 @@ var (
 func addKnownTypes(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion,
 		&Widget{}, &WidgetList{}, &Gadget{}, &GadgetList{},
-		&ClusterWidgetServer{}, &ClusterWidgetServerList{}, &WidgetServer{}, &WidgetServerList{})
+		&ClusterWidgetServer{}, &ClusterWidgetServerList{}, &WidgetServer{}, &WidgetServerList{},
+		&ClusterCloudWidgetServer{}, &ClusterCloudWidgetServerList{}, &CloudWidgetServer{}, &CloudWidgetServerList{})
 	metav1.AddToGroupVersion(s, GroupVersion)
 	return nil
 }

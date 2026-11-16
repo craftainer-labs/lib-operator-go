@@ -143,6 +143,6 @@ func TestDeepCopy(t *testing.T) {
 		&common.BindingStatus{}, &common.CredentialsStatus{}, &common.RotationStatus{},
 		&common.LabelSelectorRequirement{}, &common.LabelSelector{}, &common.AllowedNamespaces{},
 		&common.KeyReference{}, &common.CABundle{}, &common.TLS{}, &common.AdminSecretRef{},
-		&common.ServerCommon{}, &common.ServerStatus{}, &common.Policies{},
+		&common.ServerCommon{}, &common.CloudServerCommon{}, &common.ServerStatus{}, &common.Policies{},
 	)
 }
