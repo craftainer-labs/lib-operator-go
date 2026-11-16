@@ -88,8 +88,8 @@ func copyRef(in *common.AdminSecretRef) *common.AdminSecretRef {
 // DeepCopyObject returns a copy.
 func (in *ClusterCloudWidgetServer) DeepCopyObject() runtime.Object {
 	out := *in
-	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-	out.Spec.CloudServerCommon = *in.Spec.CloudServerCommon.DeepCopy()
+	in.DeepCopyInto(&out.ObjectMeta)
+	out.Spec.CloudServerCommon = *in.Spec.DeepCopy()
 	out.Spec.CredentialsSecret = copyRef(in.Spec.CredentialsSecret)
 	out.Spec.AllowedNamespaces = *in.Spec.AllowedNamespaces.DeepCopy()
 	in.Status.DeepCopyInto(&out.Status)
@@ -99,7 +99,7 @@ func (in *ClusterCloudWidgetServer) DeepCopyObject() runtime.Object {
 // DeepCopyObject returns a copy.
 func (in *ClusterCloudWidgetServerList) DeepCopyObject() runtime.Object {
 	out := *in
-	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	in.DeepCopyInto(&out.ListMeta)
 	out.Items = make([]ClusterCloudWidgetServer, len(in.Items))
 	for i := range in.Items {
 		out.Items[i] = *in.Items[i].DeepCopyObject().(*ClusterCloudWidgetServer)
@@ -110,8 +110,8 @@ func (in *ClusterCloudWidgetServerList) DeepCopyObject() runtime.Object {
 // DeepCopyObject returns a copy.
 func (in *CloudWidgetServer) DeepCopyObject() runtime.Object {
 	out := *in
-	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-	out.Spec.CloudServerCommon = *in.Spec.CloudServerCommon.DeepCopy()
+	in.DeepCopyInto(&out.ObjectMeta)
+	out.Spec.CloudServerCommon = *in.Spec.DeepCopy()
 	out.Spec.CredentialsSecret = copyRef(in.Spec.CredentialsSecret)
 	in.Status.DeepCopyInto(&out.Status)
 	return &out
@@ -120,7 +120,7 @@ func (in *CloudWidgetServer) DeepCopyObject() runtime.Object {
 // DeepCopyObject returns a copy.
 func (in *CloudWidgetServerList) DeepCopyObject() runtime.Object {
 	out := *in
-	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	in.DeepCopyInto(&out.ListMeta)
 	out.Items = make([]CloudWidgetServer, len(in.Items))
 	for i := range in.Items {
 		out.Items[i] = *in.Items[i].DeepCopyObject().(*CloudWidgetServer)
