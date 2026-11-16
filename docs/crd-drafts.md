@@ -1,7 +1,7 @@
 # CRD drafts for the five craftainer.dev groups
 
 API for the five groups, written to the conventions of
-[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted; section 16 is Proposed, see "Cloud providers (proposed)" at the end; the user approved
+[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted; section 16 is Proposed and decided, see "Cloud providers (proposed)" at the end; the user approved
 the G-api decisions on 2026-11-01 and they are folded in). All kinds are `v1alpha1`. Nothing here is
 implemented; the field tables are what the API types and CRD schemas will be
 generated from. The shared blocks are Go types in `lib-operator-go`'s
@@ -556,13 +556,12 @@ spec:
 
 ## Cloud providers (proposed)
 
-**Proposed**, not decided: the field names and shapes below are a draft for
-G-api (NK-api, 2026-11-16), with the reasoning, the Kubernetes API
-conventions it follows, the open questions and the sources in
+**Proposed**, decided at G-api (user, 2026-11-16, all eleven questions); it
+becomes Accepted when NK0 implements it. The field names and shapes below are
+the decided ones, with the reasoning, the Kubernetes API conventions they
+follow, the decisions and the sources in
 [ADR 0002 section 16](adrs/0002-operator-crd-conventions.md). The self-hosted
-kinds above are unchanged when `spec.provider` is absent. Rules that depend
-on open questions 1, 4 and 11 (the discriminator, the Azure admin login and
-the s3 schema defaults) are provisional and change with the user's answers.
+kinds above are unchanged when `spec.provider` is absent.
 
 ### `CloudServerCommon` (every server kind of a cloud-capable group)
 
@@ -583,7 +582,7 @@ CEL on the server spec:
 - `!has(self.credentials) || (self.credentials.source == 'Secret' ? has(self.credentials.secretRef) : !has(self.credentials.secretRef))`.
 - Namespaced kinds only, no workload identity: `!has(self.provider) || (has(self.credentials) && self.credentials.source == 'Secret')`.
 - `host` (db, cache, mqtt) and `endpoint` (s3) are required iff `provider` is absent; with a provider they are optional overrides of the discovered data-plane address. s3's `region`, `pathStyle` and `backend` lose their schema defaults (the controller applies them) and are forbidden with a provider.
-- `adminCredentialsSecretRef` (the data-plane login) stays required on the db server kinds; on the s3, mqtt, cache and oidc server kinds it is forbidden with a provider (the cloud API credential is `credentials`).
+- `adminCredentialsSecretRef` (the data-plane login) stays required on the db server kinds (unless `adminAuthMode: IAM`, Azure only); on the s3, mqtt, cache and oidc server kinds it is forbidden with a provider (the cloud API credential is `credentials`).
 
 Common fields of each `provider.<cloud>` block (an operator adds the target
 fields listed under its group):
@@ -645,10 +644,12 @@ and no `uri` with one; a cache binding keeps `keyPrefix`, `sslrootcert` and the
 ### db × cloud
 
 `ClusterDatabaseServer` and `DatabaseServer` include `CloudServerCommon`
-(`adminCredentialsSecretRef` stays required). **Provisional (open question 4):**
-Azure `authMode: IAM` needs the operator's own Entra identity as the data-plane
-administrator, which a required password Secret cannot express; the draft keeps
-the Secret required and the `IAM` mode on Azure unresolved. Target fields:
+(`adminCredentialsSecretRef` stays required unless `adminAuthMode: IAM`).
+Extra field `adminAuthMode` (enum `Password` default, `IAM`; `IAM` only with
+`provider.type: Azure` in `v1alpha1`, CEL): `IAM` means the operator logs in
+as the Entra administrator named by `provider.azure.entraAdmin` (required with
+`IAM`, maxLength 128; name settled in NKdb-3) with its own token, and
+`adminCredentialsSecretRef` is then forbidden. Target fields:
 
 | Cloud | Field | Req | Notes |
 | --- | --- | --- | --- |
@@ -781,7 +782,7 @@ spec:
 ### oidc × cloud
 
 The discriminator is the existing `type`, extended with `Cognito` and
-`Entra`; there is no `provider` field in this group (open question 1).
+`Entra`; there is no `provider` field in this group (decided, ADR 0002 section 16.8).
 `ClusterIdentityProvider` and `IdentityProvider` add `credentials` and:
 
 | Field | Type | Req | Validation |

@@ -8,9 +8,9 @@ The user approved the G-api decisions on 2026-11-01 (the outcomes are recorded
 in "Decisions (G-api, 2026-11-01)" at the end). The ADR became Accepted when
 NO1b's implementation merged, as `docs/adrs/README.md` requires.
 
-Section 16 (cloud providers) is a later addition and is **Proposed**: it is
-not part of the Accepted decision until the user decides its open questions
-and its implementation merges.
+Section 16 (cloud providers) is a later addition. The user decided its eleven
+questions on 2026-11-16 (16.8), but it stays **Proposed** and becomes Accepted
+when NK0 implements it, as `docs/adrs/README.md` requires.
 
 ## Context
 
@@ -871,10 +871,10 @@ to it after the next library release.
 
 ### 16. Cloud providers
 
-Status: **Proposed** (draft for G-api, NK-api, 2026-11-16). Nothing in this
-section is decided or implemented, and the Accepted status of sections 1 to 15
-is unaffected. The user decides the open questions at the end of the section;
-the plan's NK0 and NK* items start only after that.
+Status: **Proposed**, decided at G-api (user, 2026-11-16: all eleven leans of
+16.8 accepted); it becomes Accepted when NK0 implements it. Nothing in this
+section is implemented, and the Accepted status of sections 1 to 15 is
+unaffected. The plan's NK0 and NK* items follow from it.
 
 Context (plan decision log, 2026-11-16): every operator gains native AWS, GCP
 and Azure backends next to its self-hosted one, behind the same claim kinds,
@@ -945,7 +945,11 @@ Rules (CEL on the server spec unless noted):
   names are fixed per cloud (16.2).
 - `adminCredentialsSecretRef` keeps its meaning, the login to the data plane.
   It is therefore still required for `ClusterDatabaseServer` and
-  `DatabaseServer` (the operator runs SQL as an administrator), and forbidden
+  `DatabaseServer` (the operator runs SQL as an administrator) unless
+  `adminAuthMode: IAM` (decided, 16.8 question 4: `Password` by default;
+  `IAM` only on Azure in `v1alpha1`, where the operator logs in with its own
+  Entra token as the Entra administrator named by `provider.azure.entraAdmin`,
+  and then the Secret is forbidden), and forbidden
   with a provider on the s3, mqtt, cache and oidc server kinds, whose cloud
   API credential is `credentials`. Self-hosted servers are unchanged.
 - Server `status` gains `discovered` (map of string, maxProperties 10, values
@@ -1039,7 +1043,7 @@ server must use `Secret` for those types, `adminCredentialsSecretRef` is
 forbidden for them, and `issuer` is required only for `Keycloak` and
 `DynamicRegistration`. For oidc the discriminator is the existing `type` (extended with `Cognito`
 and `Entra`, with blocks `cognito` and `entra`), not a second `provider`
-(open question 1). `issuer` is derived (`https://cognito-idp.<region>.amazonaws.com/<userPoolID>`,
+(decided, 16.8 question 1). `issuer` is derived (`https://cognito-idp.<region>.amazonaws.com/<userPoolID>`,
 and the tenant's v2.0 issuer).
 
 **Endpoint override (test-only).** `endpointOverride` points the SDK at an
@@ -1049,15 +1053,15 @@ an `https` URL, or `http` when the operator runs with `EGRESS_MODE=allow-private
 and the operator honours it only in `allow-private` mode. In `strict` mode a
 server that sets it is `Ready=False`, reason `EndpointOverrideForbidden`. The
 mode is a startup setting that CEL cannot see, so the controller enforces it.
-Trade-off: gating on the egress mode adds no new knob and means "private
-addresses are acceptable here" has one switch, but production use of private
-cloud endpoints (AWS PrivateLink or VPC endpoints resolve to RFC 1918 addresses)
-also needs `allow-private` and is not a test, so the mode cannot tell a test
-from a PrivateLink deployment. The alternative is a separate switch (an
-operator env var such as `CLOUD_ENDPOINT_OVERRIDE=allow`). Note on emulators:
-section 15 blocks loopback in both modes, so CI must reach an emulator at a
-private address (a service container or pod IP), not `127.0.0.1`. The plan's
-"emulators on loopback" wording has to change.
+Trade-off (decided: gate on the egress mode): this adds no new knob and
+means "private addresses are acceptable here" has one switch, but production
+use of private cloud endpoints (AWS PrivateLink or VPC endpoints resolve to
+RFC 1918 addresses) also needs `allow-private` and is not a test, so the mode
+cannot tell a test from a PrivateLink deployment. A separate switch (an
+operator env var such as `CLOUD_ENDPOINT_OVERRIDE=allow`) was the rejected
+alternative. Emulators: section 15 blocks loopback in both modes, so CI
+reaches an emulator at a private address (a service container or pod IP),
+never loopback or `127.0.0.1`.
 
 #### 16.4 `authMode` on `DatabaseRole` and `CacheUser`
 
@@ -1111,8 +1115,9 @@ spec:
   marked with another UID is never adopted, so a tenant cannot take over or
   drop another tenant's login. A tenant can
   still name any principal in the project and give it access to its own
-  database; it gains nothing outside that database. Open question 6 asks for an
-  optional allow-list on cluster servers.
+  database; it gains nothing outside that database. An optional
+  allow-list of principals on cluster servers was considered and not adopted
+  (16.8 question 6); it can be added later without breaking the API.
 - IAM-mode paths have no emulator that validates tokens (plan, NKR1). They get
   unit tests against recorded API shapes, and their NFR verification says
   "untested in CI" until a real-cloud lane exists.
@@ -1219,8 +1224,8 @@ long-running operations are polled the same way. The 10-second requeue is
 shorter than the 30 second minimum of `craftainer.dev/poll-interval`
 (section 6), which needs a library change: `External` must be able to report
 "pending, check again in X" and `pkg/lifecycle` must requeue sooner without an
-error. That is an addition to NK0, not a change to this ADR's decisions
-(open question 8).
+error. That is NK0 scope, a new exported name and so a minor release of this
+library (decided, 16.8 question 8).
 
 #### 16.7 Out of scope or dropped
 
@@ -1245,74 +1250,52 @@ error. That is an addition to NK0, not a change to this ADR's decisions
   clouds beyond what the AWS region and ARN partition imply, and the operator
   creating its own cloud identity.
 
-#### 16.8 Open questions for the user
+#### 16.8 Decisions (user, 2026-11-16)
 
-The user can answer by number. The tables above are the proposal if the lean
-is taken in each case.
+The user accepted the lean of all eleven questions. The tables above are the
+decided shapes. Each line records the question and what was decided; the
+rejected options are named so a later change can find them.
 
-1. **Where the discriminator lives.** Options: (a) `spec.provider` on db, s3,
-   cache and mqtt, and the existing `type` extended with `Cognito` and
-   `Entra` on oidc; (b) `spec.provider` on all five, so oidc has `type`
-   (Keycloak, DynamicRegistration) and `provider.type` (AWS, Azure), two
-   discriminators; (c) no new field: extend the per-operator enums (`backend`
-   on s3, `type` on oidc, a new `type` elsewhere) with `AWS`, `GCP`, `Azure`
-   values. Lean (a): `Keycloak` and `Cognito` are alternatives of one thing,
-   an identity provider, while a cloud is where a database runs.
-2. **Namespaced servers and `WorkloadIdentity`.** Options: forbid it (CEL);
-   allow it behind an operator setting; allow it. Lean: forbid, because a
-   tenant-created server could aim the operator's own cloud permissions at any
-   target (16.2).
-3. **Who may set `endpointOverride`, and when.** Options: (a) cluster kinds
-   only, honoured only with `EGRESS_MODE=allow-private`; (b) as (a) with a
-   separate operator switch; (c) any server, ungated. Lean (a).
-4. **Data-plane admin login through IAM.** Today `adminCredentialsSecretRef`
-   gives the db operator a password admin. Azure's `pgaadauth_create_principal`
-   must run as an Entra administrator, so the Azure IAM mode needs the
-   operator's own identity to log in. Options: (a) an `adminAuthMode`
+1. **Discriminator.** Decided: `spec.provider` on db, s3, cache and mqtt; the
+   existing `type` extended with `Cognito` and `Entra` on oidc. Rejected:
+   `provider` on all five (two discriminators in oidc), and extending each
+   operator's own enum.
+2. **Namespaced servers and `WorkloadIdentity`.** Decided: forbidden by CEL
+   (a tenant-created server could aim the operator's own permissions at any
+   target, 16.2). Rejected: allowing it behind a setting, or outright.
+3. **`endpointOverride`.** Decided: cluster kinds only, honoured only with
+   `EGRESS_MODE=allow-private`. Rejected: a separate operator switch, and any
+   server ungated.
+4. **Data-plane admin login through IAM.** Decided: `adminAuthMode`
    (`Password` default, `IAM`) on cloud db servers, `IAM` only for Azure in
-   `v1alpha1`; (b) a password admin everywhere and no Azure IAM mode at first;
-   (c) `IAM` admin on every cloud. Lean (a).
-5. **Binding key names.** The proposal uses `cloud`, `authMode`,
-   `iamResourceArn`, `instanceConnectionName`, and for mqtt × AWS
-   `certificate.pem` and `private-key.pem` with `endpoint`. The Service
-   Binding core spec reserves `certificates` and `private-key` with value
-   requirements (section 7), and `CreateKeysAndCertificate` returns the key in
-   a form that may not meet them. Options: our names (the lean, no spec
-   conflict, matching the plan's wording); the reserved names; both. Also:
-   keep `endpoint` next to `host`, `port` and `protocol`, or drop it?
-6. **IAM principals as role names.** Cloud SQL and Azure force a
-   claim-chosen name (16.4). Options: (a) the proposal (marker plus
-   `NameCollision`); (b) add an optional `allowedPrincipals` (list of
-   patterns) on cluster servers, required to be matched when set; (c) both,
-   with the list required on cluster servers. Lean (a) now, (b) when a user
-   asks.
-7. **`authMode` and `provider.type` immutability.** Options: both immutable
-   (the lean: a change means a new claim or server); `authMode` switchable with
-   a transition (new login, then delete the old one). Lean immutable.
-8. **Async polling in the library.** The 10-second requeue needs an
-   `External` signal for "pending" and a shorter requeue than the 30-second
-   poll minimum. Options: (a) add it to `pkg/lifecycle` in NK0 (a new
-   exported name, so a minor release); (b) each operator polls inside
-   `Create` and `Update` with a bounded wait (no library change, but it holds
-   a reconcile worker for up to minutes). Lean (a).
-9. **Sovereign clouds.** AWS GovCloud and China follow from the region, but
-   Azure national clouds need an authority host and GCP a universe domain.
-   Options: leave out of `v1alpha1` (lean) or add `provider.azure.cloud`
-   (`Public`, `USGovernment`, `China`) now.
-10. **Credential Secret key names and the GCP restriction.** The keys in 16.2
-    (`accessKeyId`, `secretAccessKey`, `sessionToken`; `credentials.json`;
-    `clientId`, `clientSecret`) differ from the RustFS admin keys
-    (`accessKey`, `secretKey`) that stay for self-hosted s3. Options: use the
-    cloud's own conventional names (the lean); reuse `accessKey` and
-    `secretKey`. And: accept only `service_account` JSON for GCP (the lean), or
-    also `external_account`.
-11. **Moving schema defaults to the controller.** To reject `region`,
-    `pathStyle` and `backend` on a cloud s3 server, their schema defaults move
-    to the controller. Options: do that now, while the API is `v1alpha1` (the
-    lean); keep the defaults and ignore the fields with a Warning Event; or
-    keep them and make the cloud variants a separate pair of kinds.
+   `v1alpha1`, with `provider.azure.entraAdmin` naming the Entra administrator
+   the operator logs in as (the field name is settled in NKdb-3). Rejected:
+   password admin everywhere with no Azure IAM mode, and `IAM` admin on every
+   cloud.
+5. **Binding key names.** Decided: `cloud`, `authMode`, `iamResourceArn`,
+   `instanceConnectionName`; for mqtt × AWS `certificate.pem`, `private-key.pem`
+   and `endpoint` (next to `host`, `port`, `protocol`), not the Service Binding
+   reserved `certificates` and `private-key`.
+6. **IAM principals as role names.** Decided: the marker plus `NameCollision`
+   protection of 16.4, no `allowedPrincipals` allow-list for now; it can be
+   added later, additively, when a user asks.
+7. **Immutability.** Decided: `authMode` and `provider.type` are both
+   immutable; a change means a new claim or server.
+8. **Async polling in the library.** Decided: add the "pending, requeue in X"
+   signal to `pkg/lifecycle` in NK0 (a minor release). Rejected: polling
+   inside `Create` and `Update`, which holds a reconcile worker.
+9. **Sovereign clouds.** Decided: out of `v1alpha1` (no `provider.azure.cloud`,
+   no GCP universe domain); AWS GovCloud and China follow from the region.
+10. **Credential Secret keys.** Decided: the cloud's own names (`accessKeyId`,
+    `secretAccessKey`, `sessionToken`; `credentials.json`; `clientId`,
+    `clientSecret`), different from RustFS's `accessKey` and `secretKey`; GCP
+    accepts only `service_account` JSON, not `external_account`.
+11. **Schema defaults.** Decided: s3 `region`, `pathStyle` and `backend` move
+    from the schema to the controller now, while the API is `v1alpha1`, so CEL
+    can reject them on a cloud server. Rejected: keeping the defaults and
+    ignoring the fields, and separate cloud kinds.
 
-Sources for 16.1 to 16.7 (the Kubernetes conventions are in the link list
+Sources for 16.1 to 16.8 (the Kubernetes conventions are in the link list
 below): [AWS IRSA], [EKS Pod Identity], [aws-sdk-go-v2 credentials], [GKE
 Workload Identity Federation], [Azure Workload Identity annotations], [RDS IAM
 authentication], [Cloud SQL IAM authentication], [Azure PostgreSQL Entra
