@@ -8,6 +8,10 @@ The user approved the G-api decisions on 2026-11-01 (the outcomes are recorded
 in "Decisions (G-api, 2026-11-01)" at the end). The ADR became Accepted when
 NO1b's implementation merged, as `docs/adrs/README.md` requires.
 
+Section 16 (cloud providers) is a later addition and is **Proposed**: it is
+not part of the Accepted decision until the user decides its open questions
+and its implementation merges.
+
 ## Context
 
 craftainer-labs ships five Kubernetes operators, one per backend, each in its
@@ -865,6 +869,412 @@ to it after the next library release.
   blocked, so a test that stands in a documentation address for a public
   host needs another one (or the zero `Policy`).
 
+### 16. Cloud providers
+
+Status: **Proposed** (draft for G-api, NK-api, 2026-11-16). Nothing in this
+section is decided or implemented, and the Accepted status of sections 1 to 15
+is unaffected. The user decides the open questions at the end of the section;
+the plan's NK0 and NK* items start only after that.
+
+Context (plan decision log, 2026-11-16): every operator gains native AWS, GCP
+and Azure backends next to its self-hosted one, behind the same claim kinds,
+lifecycle (sections 3 to 8), naming (section 10) and egress policy (section
+15). The user decided: native API calls (no ACK, Config Connector or ASO); all
+five operators; emulator-only CI; `credentials.source` `WorkloadIdentity`
+(default) or `Secret`; db and cache tenant login `Password` and `IAM`, both
+from the start; the AWS mqtt certificate and key go in the binding Secret;
+mqtt × GCP, oidc × GCP dropped; cache × Azure deferred (NKR1). This section
+drafts the field names and shapes for those decisions. The field tables are in
+[`docs/crd-drafts.md`](../crd-drafts.md), "Cloud providers (proposed)".
+
+API conventions applied ([Kubernetes API conventions], "Constants" and
+"Unions"): enum values are CamelCase with an initial capital (`AWS`, `GCP`,
+`Azure`, `WorkloadIdentity`, `Secret`, `Password`, `IAM`; acronyms stay upper
+case, as in `ClientIP`); the members of a union are all optional, one
+discriminator selects the member and no default is set on the union fields
+themselves; Go fields are PascalCase and JSON fields camelCase. The
+discriminator-plus-matching-block shape is the one `IdentityProvider` already
+uses (`type` with `keycloak` or `dynamicRegistration`, in the
+[drafts](../crd-drafts.md)), so this adds no new pattern.
+
+#### 16.1 Shape in one view
+
+On the five server kinds (cluster and namespaced alike) the cloud variant is
+two optional blocks next to the self-hosted fields:
+
+```yaml
+spec:
+  provider:                    # absent: self-hosted, exactly as today
+    type: AWS                  # AWS | GCP | Azure (an operator lists only the clouds it supports); immutable
+    aws: {region: eu-west-1, roleARN: arn:aws:iam::111122223333:role/pg-admin,
+          dbInstanceIdentifier: orders-prod}
+  credentials:                 # absent with a provider: WorkloadIdentity
+    source: WorkloadIdentity   # WorkloadIdentity | Secret
+    # secretRef: {name: aws-creds, namespace: craftainer-system}   # Secret only
+```
+
+Rules (CEL on the server spec unless noted):
+
+- `provider` is the discriminated union: `type` selects exactly one of `aws`,
+  `gcp`, `azure` (each rule is `self.type == 'AWS' ? has(self.aws) :
+  !has(self.aws)`, and likewise for the others). `type` is immutable
+  (`self == oldSelf`): a server cannot move between clouds, because claims
+  already point at objects in the old one. The target fields under the block
+  (instance, user pool, ...) stay mutable so a restored instance can be
+  re-pointed; claims keep working by `status.externalName`.
+- With `provider` set, the self-hosted connection fields that name a host are
+  no longer required. `host` (db, cache, mqtt) and `endpoint` (s3) are required
+  only when `provider` is absent. With a provider they are optional overrides
+  of the discovered data-plane address (needed when an emulator's API and its
+  data plane are different processes), and every connection still goes through
+  `pkg/egress` (section 15). `issuer` (oidc) is derived from the pool or
+  tenant. The self-hosted-only fields `s3.region`, `s3.pathStyle` and
+  `s3.backend` lose their schema defaults and get them in the controller, so
+  CEL can reject them when `provider` is set (a defaulted field is always
+  present to CEL).
+- `credentials` is allowed only with `provider`.
+  `credentials.source == 'Secret'` requires `credentials.secretRef`;
+  `WorkloadIdentity` forbids it. `secretRef` is `{name, namespace?}` with the
+  same namespace rules as `adminCredentialsSecretRef` (cluster server: the
+  operator's namespace only, namespaced server: none). It has no `key`: the key
+  names are fixed per cloud (16.2).
+- `adminCredentialsSecretRef` keeps its meaning, the login to the data plane.
+  It is therefore still required for `ClusterDatabaseServer` and
+  `DatabaseServer` (the operator runs SQL as an administrator), and forbidden
+  with a provider on the s3, mqtt, cache and oidc server kinds, whose cloud
+  API credential is `credentials`. Self-hosted servers are unchanged.
+- Server `status` gains `discovered` (map of string, maxProperties 10, values
+  maxLength 512), the same shape as `lateInitialized`, for what the operator
+  read from the cloud: `endpoint`, `port`, `resourceId` (RDS `DbiResourceId`
+  or `DbClusterResourceId`), `accountId`, `region`. The probe (section 14)
+  fills it, and claims read it from the cached server.
+- New condition reasons: `CredentialsUnavailable` (no workload identity
+  injected, Secret missing or malformed), `TargetNotFound` (the named instance,
+  user pool or namespace does not exist), `AuthModeUnsupported`,
+  `IAMPrincipalRequired`, `EndpointOverrideForbidden`. Messages stay coarse
+  (section 14).
+
+#### 16.2 `credentials.source`
+
+`WorkloadIdentity` (default) lets the cloud SDK's default chain find the
+operator pod's identity. The controller code calls no cloud API for it:
+
+| Cloud | Chain the SDK walks | What the user sets up |
+| --- | --- | --- |
+| AWS | `aws-sdk-go-v2` default config: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN` (IRSA), or `AWS_CONTAINER_CREDENTIALS_FULL_URI` + token file (EKS Pod Identity) | IRSA: annotate the operator's ServiceAccount `eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<name>`. Pod Identity: no annotation; a Pod Identity association for the ServiceAccount (`aws eks create-pod-identity-association`). Either way the role's trust policy is the user's |
+| GCP | Application Default Credentials: the GKE metadata server (Workload Identity Federation for GKE) or an `external_account` file | Preferred: grant IAM roles directly to the federated principal `principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/<operator-ns>/sa/<sa>`, no annotation. Alternative: annotate the ServiceAccount `iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com` and bind `roles/iam.workloadIdentityUser` |
+| Azure | `azidentity` `DefaultAzureCredential` / `WorkloadIdentityCredential`: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE` | annotate the ServiceAccount `azure.workload.identity/client-id: <client id>` (optional `azure.workload.identity/tenant-id`), put the pod label `azure.workload.identity/use: "true"` on the operator's pod template (the webhook only mutates labelled pods), and create the federated identity credential for the issuer and subject `system:serviceaccount:<ns>:<sa>` |
+
+The operator never creates, edits or deletes its own identity: not the IAM
+role, trust policy, federated credential, role assignment or ServiceAccount
+annotation. The chart exposes `serviceAccount.annotations` and `podLabels`
+values; the user supplies the annotations and the grants. What the operator
+does create is tenant-scoped cloud objects named by claims (IAM users and
+access keys, service accounts, IoT certificates, ACL users, app clients),
+within the permissions the user granted. Each operator's ADR 0005 lists the
+exact actions; the resource types are:
+
+| Operator | AWS | GCP | Azure |
+| --- | --- | --- | --- |
+| db | read RDS instances and clusters (`rds:Describe*`) | Cloud SQL users and instances (`cloudsql.users.*`, `cloudsql.instances.get`) | read the PG flexible server; Entra admin on it for IAM mode |
+| s3 | buckets, IAM users, access keys and user policies | buckets, service accounts, HMAC keys | containers, role assignments (or SAS) on one storage account |
+| cache | ElastiCache or MemoryDB users, one user group or ACL, read replication groups or clusters | Memorystore ACL policies and read instances | deferred |
+| mqtt | IoT certificates, policies, policy attachments, `DescribeEndpoint` | dropped | Event Grid namespace clients (NKmqtt-2 verifies) |
+| oidc | Cognito user pool app clients | dropped | Graph `Application.ReadWrite.OwnedBy` (app registrations the operator owns) |
+
+`Secret` holds a static credential. The key names are fixed per cloud, so the
+reference has no `key`:
+
+| Cloud | Keys | Notes |
+| --- | --- | --- |
+| AWS | `accessKeyId`, `secretAccessKey`, optional `sessionToken` | used with `roleARN` as the AssumeRole source when that is set |
+| GCP | `credentials.json` | the filename Google's tooling uses for ADC. Only `"type": "service_account"` is accepted; an `external_account` or impersonation file is rejected (`CredentialsUnavailable`), because such a file can make the client fetch a URL or run an executable that a tenant chose (Google's guidance on externally sourced credential configs) |
+| Azure | `clientId`, `clientSecret` | the tenant comes from `provider.azure.tenantID`; certificates are not offered in `v1alpha1` |
+
+Defaults and tiers: `source` defaults to `WorkloadIdentity` when `credentials`
+is present, and an absent `credentials` is read as `WorkloadIdentity` by the
+controller (a schema default on the object would also apply without a
+provider). **A namespaced server must use `Secret`** (CEL: `!has(self.provider)
+|| (has(self.credentials) && self.credentials.source == 'Secret')`). A
+namespaced server is tenant-created and may name any target, so with the
+operator's own identity it would be a confused deputy: a tenant could aim the
+operator's cloud permissions at any instance, bucket or pool those
+permissions reach. Cluster servers are created by the platform admin and may
+use `WorkloadIdentity`. The Secret of a cluster server lives in the operator
+namespace, so no tenant reads it; a namespaced server's Secret is the
+tenant's own.
+
+#### 16.3 Provider configuration per cloud
+
+The common fields are the same in every operator; the target fields below
+them are the operator's own.
+
+| Cloud | Common fields | Notes |
+| --- | --- | --- |
+| `aws` | `region` (required; pattern `^[a-z]{2}(-[a-z]+)+-[0-9]+$`, maxLength 32), `roleARN` (optional; AssumeRole from the source credentials; `arn:` prefix by CEL, maxLength 2048), `endpointOverride` | the AWS partition follows from the region and from `roleARN` |
+| `gcp` | `project` (required; project ID pattern, maxLength 30), `location` (region; required where the resource is regional), `endpointOverride` | |
+| `azure` | `tenantID` (required; GUID), `subscriptionID` and `resourceGroup` (required for the ARM-based operators db, s3, mqtt; absent for oidc, which talks to Graph), `endpointOverride` | |
+
+What identifies the target, per operator (an `allowedNamespaces` selector and
+the naming rules apply as before):
+
+| Operator | AWS | GCP | Azure |
+| --- | --- | --- | --- |
+| db | `dbInstanceIdentifier` or `dbClusterIdentifier` (exactly one; an Aurora cluster uses its writer endpoint) | `instance` (with `project` and `location`; the instance connection name `project:location:instance` is derived and written to the binding) | `serverName` (a PG flexible server in `resourceGroup`) |
+| s3 | the account and `region` are the target: buckets are created in `region`; optional `iamPath` (default `/craftainer/`) and `permissionsBoundaryARN` for the IAM users the operator creates | `project`, `location` (bucket location) | `storageAccount` (3 to 24 lowercase letters or digits) |
+| cache | `elasticache: {userGroupID, replicationGroupID}` or `memorydb: {aclName, clusterName}` (exactly one block). The user group or ACL must already exist and be attached to the cluster by the admin; the operator only adds and removes users in it | `memorystore: {instance}` (with `project` and `location`) | deferred |
+| mqtt | none beyond `region`: the operator reads the account's IoT data endpoint (`DescribeEndpoint`, `iot:Data-ATS`) | dropped | `eventGridNamespace` (name, in `resourceGroup`) |
+| oidc | `cognito: {userPoolID, domain}`; `domain` (the hosted-UI domain prefix or custom domain) is needed to build the token and authorization endpoints | dropped | `entra: {}` only: the target is the tenant (`tenantID`) |
+
+For oidc the discriminator is the existing `type` (extended with `Cognito`
+and `Entra`, with blocks `cognito` and `entra`), not a second `provider`
+(open question 1). `issuer` is derived (`https://cognito-idp.<region>.amazonaws.com/<userPoolID>`,
+and the tenant's v2.0 issuer).
+
+**Endpoint override (test-only).** `endpointOverride` points the SDK at an
+emulator (moto, MiniStack, fake-gcs-server, Azurite). Proposal: it exists on
+cluster server kinds only (CEL on the namespaced kinds forbids it); a value is
+an `https` URL, or `http` when the operator runs with `EGRESS_MODE=allow-private`;
+and the operator honours it only in `allow-private` mode. In `strict` mode a
+server that sets it is `Ready=False`, reason `EndpointOverrideForbidden`. The
+mode is a startup setting that CEL cannot see, so the controller enforces it.
+Trade-off: gating on the egress mode adds no new knob and means "private
+addresses are acceptable here" has one switch, but production use of private
+cloud endpoints (AWS PrivateLink or VPC endpoints resolve to RFC 1918 addresses)
+also needs `allow-private` and is not a test, so the mode cannot tell a test
+from a PrivateLink deployment. The alternative is a separate switch (an
+operator env var such as `CLOUD_ENDPOINT_OVERRIDE=allow`). Note on emulators:
+section 15 blocks loopback in both modes, so CI must reach an emulator at a
+private address (a service container or pod IP), not `127.0.0.1`. The plan's
+"emulators on loopback" wording has to change.
+
+#### 16.4 `authMode` on `DatabaseRole` and `CacheUser`
+
+```yaml
+spec:
+  authMode: IAM          # Password (default) | IAM; immutable
+  iam:
+    principal: app-sa@my-project.iam    # GCP and Azure only
+```
+
+- `authMode` is `Password` (default: today's path, a generated credential in
+  the binding Secret, two-phase rotation of section 8) or `IAM` (the tenant's
+  cloud identity logs in with a short-lived token and the operator creates
+  no password). It is immutable (CEL `self == oldSelf`): switching modes
+  changes the external object, the binding keys and the rotation state, so it
+  is a new claim. `IAM` needs a cloud server; the claim cannot see the
+  server's provider (CEL cannot cross objects), so the controller refuses it
+  on a self-hosted server with `AuthModeUnsupported`.
+- `iam.principal` (string, maxLength 320) is the consumer's cloud identity
+  name, required for GCP and Azure and refused for AWS (`IAMPrincipalRequired`;
+  the controller checks it against the server's cloud). CEL on the claim:
+  `!has(self.iam) || self.authMode == 'IAM'`, and `rotationPolicy` is
+  forbidden in IAM mode: `self.authMode == 'Password' ||
+  !has(self.rotationPolicy)`. In IAM mode there is nothing to rotate; the
+  `craftainer.dev/rotate` annotation produces a Warning Event with the
+  existing reason `RotationUnsupported` and `status.rotation` stays empty.
+- Per backend in IAM mode:
+
+| Backend | What the operator creates | Consumer's login |
+| --- | --- | --- |
+| RDS / Aurora Postgres | one login role named by `naming.Tenant` (no `_a`/`_b`), `GRANT rds_iam`, and the same privileges as `Password` mode | `rds-db:connect` on `arn:aws:rds-db:<region>:<account>:dbuser:<resourceId>/<role>`, which the user adds to the workload's role; a token from `BuildAuthToken` (15 minutes), as the password |
+| Cloud SQL Postgres | an IAM database user via `sqladmin users.insert` (type `CLOUD_IAM_USER` or `CLOUD_IAM_SERVICE_ACCOUNT`) named by `iam.principal`, plus the SQL grants | the Cloud SQL connector with IAM authentication (`cloudsqlconn` `WithIAMAuthN`), which refreshes the token itself |
+| Azure PG flexible | an Entra principal via `pgaadauth_create_principal` named by `iam.principal`, plus the grants | an Entra token for scope `https://ossrdbms-aad.database.windows.net/.default` as the password |
+| ElastiCache / MemoryDB | a user with authentication mode `iam`, whose user id equals its user name, in the configured user group or ACL | a SigV4-presigned token as the password (`elasticache:Connect` or `memorydb:connect` on the cluster and the user) |
+| Memorystore for Valkey | an ACL policy bound to `iam.principal` | an OAuth access token (1 to 12 hours) sent with `AUTH` (login shape verified in NKcache-2) |
+
+- Deviation from section 10 ("a claim can never choose an external name"): on
+  Cloud SQL and Azure the database user's name must be the principal's name, so
+  in those two modes `iam.principal` is chosen by the claim. The protections
+  are the section 10 ownership marker (`COMMENT ON ROLE` with the claim's UID)
+  and `NameCollision` against a role that exists unmarked or with another UID,
+  so a tenant cannot take over or drop another tenant's login. A tenant can
+  still name any principal in the project and give it access to its own
+  database; it gains nothing outside that database. Open question 6 asks for an
+  optional allow-list on cluster servers.
+- IAM-mode paths have no emulator that validates tokens (plan, NKR1). They get
+  unit tests against recorded API shapes, and their NFR verification says
+  "untested in CI" until a real-cloud lane exists.
+
+#### 16.5 Binding Secret shapes
+
+All cloud bindings keep the section 7 type (`postgresql`, `redis`, `s3`,
+`mqtt`, `oidc`), `type` and `provider`, and add:
+
+| Key | Values | When |
+| --- | --- | --- |
+| `cloud` | `aws`, `gcp`, `azure` | every cloud binding |
+| `authMode` | `Password`, `IAM` | db and cache bindings |
+| `iamResourceArn` | the ARN the consumer's role must be allowed to `connect` to | AWS, `IAM` mode |
+| `instanceConnectionName` | `project:location:instance` | Cloud SQL, both modes |
+| `region` | the AWS region | AWS db and cache |
+
+`IAM` mode, db and cache: the keys are `host`, `port`, `database` (db),
+`username`, `sslmode` and `sslrootcert` (db), `uri` without a password, plus
+the keys above. There is **no `password`** and no `uri` that embeds one. For
+GCP and Azure `username` is the principal's name (the consumer's own identity,
+which is the "principal name"); for AWS `username` is the derived role or user
+id and `iamResourceArn` is the "ARN" the consumer must be authorized for.
+Nothing in the Secret is secret in this mode, but it is still a Secret so the
+shape is the same.
+
+mqtt × AWS IoT Core (user decision: certificate and key in the Secret):
+
+| Key | Value |
+| --- | --- |
+| `host`, `port`, `protocol` | the account's data endpoint (`<id>-ats.iot.<region>.amazonaws.com`), `8883`, `mqtts` |
+| `endpoint` | `mqtts://<host>:8883`, the one-key form of the three above |
+| `clientId` | derived with `naming.Tenant` (`-`, `HashShort`, at most 128 bytes, the IoT limit); the attached IoT policy allows `iot:Connect` on this client id only, and the tenant topic root (`<ns>/`) for publish, subscribe and receive |
+| `certificate.pem` | the device certificate from `CreateKeysAndCertificate` |
+| `private-key.pem` | its private key, which AWS returns once; never logged, and never written to status or an Event |
+| `topicRoot` | `<ns>/` as in the other mqtt bindings |
+
+No `username` or `password` (the certificate is the credential) and no
+`sslrootcert` (the data endpoint's certificate chains to the Amazon Trust
+Services roots that system trust stores carry). The IoT policy is one per
+claim, named by `naming.Tenant`, and carries the ownership tag. Rotation is
+certificate replacement: `RotateBegin` creates a new certificate (active),
+attaches the policy and rewrites the Secret (`rotation.active` is the new
+certificate ID); `RotateFinish` after the grace period sets the old one
+`INACTIVE`, detaches the policy and deletes it. A crash between
+`CreateKeysAndCertificate` and the policy attachment leaves an unattached
+certificate, which grants nothing; the operator's sweep removes certificates
+not in `rotation.active` or `rotation.previous` (specified in NKmqtt-1). The
+generation cannot be derived from `rotation.sequence` as section 8 prefers,
+because AWS assigns the certificate ID.
+
+#### 16.6 Status
+
+`externalName` is the derived name, `externalId` the cloud's own identifier,
+as in section 3:
+
+| Kind × cloud | `externalName` | `externalId` |
+| --- | --- | --- |
+| DatabaseRole / Database (all clouds) | role or database name (as self-hosted; the principal for Cloud SQL and Azure IAM) | none |
+| BucketAccess × AWS | IAM user name | IAM user ARN (`rotation.active` is the access key ID) |
+| Bucket × AWS, GCP | bucket name | `arn:aws:s3:::<bucket>`, `projects/_/buckets/<bucket>` |
+| CacheUser × ElastiCache, MemoryDB | user id (at most 40 characters, letters, digits and hyphens: `naming.Tenant` with `-` and `HashShort`, `maxLen` 40) | user ARN |
+| CacheUser × Memorystore | ACL policy id | ACL policy resource name |
+| MqttUser × AWS | IoT policy name | active certificate ARN (`rotation.active` is the certificate ID) |
+| OidcClient × Cognito | app client name | app client ID (also `clientId` in the binding) |
+| OidcClient × Entra | app registration name | application object ID (`clientId` in the binding is the app ID) |
+
+`ElastiCache` and `MemoryDB` users are API-only and asynchronous: a user is
+`creating`, `active`, `modifying` or `deleting`, and the SDKs have no waiter
+for it (NKR1). The operator polls `DescribeUsers` (and the user group or ACL
+state, which is also asynchronous) after every write:
+
+| Cloud status | `Ready` | `Synced` | Next |
+| --- | --- | --- | --- |
+| `creating` | `False`, `Creating` | `True` | requeue in 10 seconds (plus jitter) |
+| `modifying` (user, group, ACL) | `False`, `Updating` | `True` | same |
+| `active` | `True`, `Available` | `True` | the drift poll |
+| `deleting` | `False`, `Deleting` | `True` | requeue until NotFound, then drop the finalizer |
+| missing without a prior create | `False`, `ReconcileError` | `False` | normal drift handling |
+
+After 15 minutes in a transitional state the reason stays but the message
+says so and the requeue backs off to the drift poll. No transitional state is
+an error, so none triggers controller-runtime backoff. Memorystore's
+long-running operations are polled the same way. The 10-second requeue is
+shorter than the 30 second minimum of `craftainer.dev/poll-interval`
+(section 6), which needs a library change: `External` must be able to report
+"pending, check again in X" and `pkg/lifecycle` must requeue sooner without an
+error. That is an addition to NK0, not a change to this ADR's decisions
+(open question 8).
+
+#### 16.7 Out of scope or dropped
+
+- **mqtt × GCP: dropped** (user decision). Google Cloud IoT Core was retired
+  on 2023-08-16 and GCP has no managed MQTT broker since; there is nothing to
+  provision.
+- **oidc × GCP: dropped** (user decision). GCP has no general API to create
+  OAuth clients (the Identity-Aware Proxy and Identity Platform clients are
+  different products with their own models).
+- **cache × Azure: deferred** (NKR1). Azure Cache for Redis is retiring, and
+  per-user access strings on Azure Managed Redis exist only in preview API
+  `2026-05-01-preview` and SDK `armredisenterprise/v4` v4.1.0-beta.1. A
+  released operator should not depend on a preview API (no SLA, may change).
+  Revisit at GA; the `provider.type` enum for cache lists `AWS` and `GCP`
+  until then.
+- Not offered in `v1alpha1`: certificate credentials for Azure, sovereign
+  clouds beyond what the AWS region and ARN partition imply, and the operator
+  creating its own cloud identity.
+
+#### 16.8 Open questions for the user
+
+The user can answer by number. The tables above are the proposal if the lean
+is taken in each case.
+
+1. **Where the discriminator lives.** Options: (a) `spec.provider` on db, s3,
+   cache and mqtt, and the existing `type` extended with `Cognito` and
+   `Entra` on oidc; (b) `spec.provider` on all five, so oidc has `type`
+   (Keycloak, DynamicRegistration) and `provider.type` (AWS, Azure), two
+   discriminators; (c) no new field: extend the per-operator enums (`backend`
+   on s3, `type` on oidc, a new `type` elsewhere) with `AWS`, `GCP`, `Azure`
+   values. Lean (a): `Keycloak` and `Cognito` are alternatives of one thing,
+   an identity provider, while a cloud is where a database runs.
+2. **Namespaced servers and `WorkloadIdentity`.** Options: forbid it (CEL);
+   allow it behind an operator setting; allow it. Lean: forbid, because a
+   tenant-created server could aim the operator's own cloud permissions at any
+   target (16.2).
+3. **Who may set `endpointOverride`, and when.** Options: (a) cluster kinds
+   only, honoured only with `EGRESS_MODE=allow-private`; (b) as (a) with a
+   separate operator switch; (c) any server, ungated. Lean (a).
+4. **Data-plane admin login through IAM.** Today `adminCredentialsSecretRef`
+   gives the db operator a password admin. Azure's `pgaadauth_create_principal`
+   must run as an Entra administrator, so the Azure IAM mode needs the
+   operator's own identity to log in. Options: (a) an `adminAuthMode`
+   (`Password` default, `IAM`) on cloud db servers, `IAM` only for Azure in
+   `v1alpha1`; (b) a password admin everywhere and no Azure IAM mode at first;
+   (c) `IAM` admin on every cloud. Lean (a).
+5. **Binding key names.** The proposal uses `cloud`, `authMode`,
+   `iamResourceArn`, `instanceConnectionName`, and for mqtt × AWS
+   `certificate.pem` and `private-key.pem` with `endpoint`. The Service
+   Binding core spec reserves `certificates` and `private-key` with value
+   requirements (section 7), and `CreateKeysAndCertificate` returns the key in
+   a form that may not meet them. Options: our names (the lean, no spec
+   conflict, matching the plan's wording); the reserved names; both. Also:
+   keep `endpoint` next to `host`, `port` and `protocol`, or drop it?
+6. **IAM principals as role names.** Cloud SQL and Azure force a
+   claim-chosen name (16.4). Options: (a) the proposal (marker plus
+   `NameCollision`); (b) add an optional `allowedPrincipals` (list of
+   patterns) on cluster servers, required to be matched when set; (c) both,
+   with the list required on cluster servers. Lean (a) now, (b) when a user
+   asks.
+7. **`authMode` and `provider.type` immutability.** Options: both immutable
+   (the lean: a change means a new claim or server); `authMode` switchable with
+   a transition (new login, then delete the old one). Lean immutable.
+8. **Async polling in the library.** The 10-second requeue needs an
+   `External` signal for "pending" and a shorter requeue than the 30-second
+   poll minimum. Options: (a) add it to `pkg/lifecycle` in NK0 (a new
+   exported name, so a minor release); (b) each operator polls inside
+   `Create` and `Update` with a bounded wait (no library change, but it holds
+   a reconcile worker for up to minutes). Lean (a).
+9. **Sovereign clouds.** AWS GovCloud and China follow from the region, but
+   Azure national clouds need an authority host and GCP a universe domain.
+   Options: leave out of `v1alpha1` (lean) or add `provider.azure.cloud`
+   (`Public`, `USGovernment`, `China`) now.
+10. **Credential Secret key names and the GCP restriction.** The keys in 16.2
+    (`accessKeyId`, `secretAccessKey`, `sessionToken`; `credentials.json`;
+    `clientId`, `clientSecret`) differ from the RustFS admin keys
+    (`accessKey`, `secretKey`) that stay for self-hosted s3. Options: use the
+    cloud's own conventional names (the lean); reuse `accessKey` and
+    `secretKey`. And: accept only `service_account` JSON for GCP (the lean), or
+    also `external_account`.
+11. **Moving schema defaults to the controller.** To reject `region`,
+    `pathStyle` and `backend` on a cloud s3 server, their schema defaults move
+    to the controller. Options: do that now, while the API is `v1alpha1` (the
+    lean); keep the defaults and ignore the fields with a Warning Event; or
+    keep them and make the cloud variants a separate pair of kinds.
+
+Sources for 16.1 to 16.7 (the Kubernetes conventions are in the link list
+below): [AWS IRSA], [EKS Pod Identity], [aws-sdk-go-v2 credentials], [GKE
+Workload Identity Federation], [Azure Workload Identity annotations], [RDS IAM
+authentication], [Cloud SQL IAM authentication], [Azure PostgreSQL Entra
+authentication], [ElastiCache RBAC], [Memorystore ACL policies], [AWS IoT
+`CreateKeysAndCertificate`], and the NKR1 findings in the plan's decision log
+(2026-11-16).
+
 ## Consequences
 
 - Five operators and one library share one vocabulary, so a user who knows
@@ -983,3 +1393,14 @@ the one on `Observe` with `rotationPolicy`: rotation needs `Update`
 [Pod Security Standards]: https://kubernetes.io/docs/concepts/security/pod-security-standards/
 [Go FIPS 140-3]: https://go.dev/doc/security/fips140
 [PostgreSQL docs]: https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS
+[AWS IRSA]: https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html
+[EKS Pod Identity]: https://docs.aws.amazon.com/eks/latest/userguide/pod-identities.html
+[aws-sdk-go-v2 credentials]: https://aws.github.io/aws-sdk-go-v2/docs/configuring-sdk/#specifying-credentials
+[GKE Workload Identity Federation]: https://cloud.google.com/kubernetes-engine/docs/concepts/workload-identity
+[Azure Workload Identity annotations]: https://azure.github.io/azure-workload-identity/docs/topics/service-account-labels-and-annotations.html
+[RDS IAM authentication]: https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/UsingWithRDS.IAMDBAuth.html
+[Cloud SQL IAM authentication]: https://cloud.google.com/sql/docs/postgres/iam-authentication
+[Azure PostgreSQL Entra authentication]: https://learn.microsoft.com/en-us/azure/postgresql/security/security-entra-configure
+[ElastiCache RBAC]: https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/Clusters.RBAC.html
+[Memorystore ACL policies]: https://docs.cloud.google.com/memorystore/docs/valkey/use-acl-policies
+[AWS IoT `CreateKeysAndCertificate`]: https://docs.aws.amazon.com/iot/latest/apireference/API_CreateKeysAndCertificate.html

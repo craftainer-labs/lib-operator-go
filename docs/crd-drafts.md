@@ -1,7 +1,7 @@
 # CRD drafts for the five craftainer.dev groups
 
 API for the five groups, written to the conventions of
-[ADR 0002](adrs/0002-operator-crd-conventions.md) (Proposed; the user approved
+[ADR 0002](adrs/0002-operator-crd-conventions.md) (Accepted, section 16 Proposed; the user approved
 the G-api decisions on 2026-11-01 and they are folded in). All kinds are `v1alpha1`. Nothing here is
 implemented; the field tables are what the API types and CRD schemas will be
 generated from. The shared blocks are Go types in `lib-operator-go`'s
@@ -550,4 +550,256 @@ spec:
   scopes: [openid, profile]
   binding: {secretName: web-oidc}
   rotationPolicy: {interval: 2160h, gracePeriod: 24h}
+```
+
+---
+
+## Cloud providers (proposed)
+
+**Proposed**, not decided: the field names and shapes below are a draft for
+G-api (NK-api, 2026-11-16), with the reasoning, the Kubernetes API
+conventions it follows, the open questions and the sources in
+[ADR 0002 section 16](adrs/0002-operator-crd-conventions.md). The self-hosted
+kinds above are unchanged when `spec.provider` is absent.
+
+### `CloudServerCommon` (every server kind of a cloud-capable group)
+
+Added to `ServerCommon`; cluster and namespaced kinds alike.
+
+| Field | Type | Req | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `provider.type` | enum | iff `provider` | | the clouds the operator supports: `AWS`, `GCP`, `Azure`; immutable (`self == oldSelf`) |
+| `provider.aws` | object | iff `type: AWS` | | see below; CEL: set exactly when `type` is `AWS`, likewise `gcp` and `azure` |
+| `provider.gcp` | object | iff `type: GCP` | | |
+| `provider.azure` | object | iff `type: Azure` | | |
+| `credentials.source` | enum | no | `WorkloadIdentity` when `credentials` is present; an absent `credentials` is read as `WorkloadIdentity` | `WorkloadIdentity`, `Secret` |
+| `credentials.secretRef` | `{name, namespace?}` | iff `source: Secret` | | `name` maxLength 253; cluster server: `namespace` required and equal to the operator's; namespaced server: `namespace` forbidden. Keys are fixed per cloud (below) |
+
+CEL on the server spec:
+
+- `credentials` only with `provider`: `!has(self.credentials) || has(self.provider)`.
+- `has(self.credentials) && self.credentials.source == 'Secret' ? has(self.credentials.secretRef) : !has(self.credentials.secretRef)`.
+- Namespaced kinds only, no workload identity: `!has(self.provider) || (has(self.credentials) && self.credentials.source == 'Secret')`.
+- `host` (db, cache, mqtt) and `endpoint` (s3) are required iff `provider` is absent; with a provider they are optional overrides of the discovered data-plane address. s3's `region`, `pathStyle` and `backend` lose their schema defaults (the controller applies them) and are forbidden with a provider.
+- `adminCredentialsSecretRef` (the data-plane login) stays required on the db server kinds; on the s3, mqtt, cache and oidc server kinds it is forbidden with a provider (the cloud API credential is `credentials`).
+
+Common fields of each `provider.<cloud>` block (an operator adds the target
+fields listed under its group):
+
+| Block | Field | Type | Req | Validation |
+| --- | --- | --- | --- | --- |
+| `aws` | `region` | string | yes | `^[a-z]{2}(-[a-z]+)+-[0-9]+$`, maxLength 32 |
+| `aws` | `roleARN` | string | no | starts with `arn:`, maxLength 2048; AssumeRole from the source credentials |
+| `gcp` | `project` | string | yes | project ID pattern, maxLength 30 |
+| `gcp` | `location` | string | where regional | maxLength 64 |
+| `azure` | `tenantID` | string | yes | GUID pattern |
+| `azure` | `subscriptionID`, `resourceGroup` | string | db, s3, mqtt | GUID; `^[-\w._()]{1,90}$`; absent for oidc (Graph) |
+| every block | `endpointOverride` | string | no | cluster kinds only (CEL on namespaced kinds forbids it); `https` URL, or `http` with `EGRESS_MODE=allow-private`; honoured only in `allow-private` mode, otherwise `Ready=False`, reason `EndpointOverrideForbidden`. For emulators, never for production. maxLength 512 |
+
+Secret keys of `credentials.secretRef` (fixed, no `key`):
+
+| Cloud | Keys |
+| --- | --- |
+| AWS | `accessKeyId`, `secretAccessKey`, optional `sessionToken` |
+| GCP | `credentials.json` (`"type": "service_account"` only) |
+| Azure | `clientId`, `clientSecret` |
+
+Server status adds `discovered` (map of string, maxProperties 10, values
+maxLength 512): `endpoint`, `port`, `resourceId`, `accountId`, `region`, as the
+operator read them. New condition reasons: `CredentialsUnavailable`,
+`TargetNotFound`, `AuthModeUnsupported`, `IAMPrincipalRequired`,
+`EndpointOverrideForbidden`.
+
+What the operator's ServiceAccount needs (the user adds it; the operator never
+creates an identity or a grant):
+
+| Cloud | Annotation or label | Also |
+| --- | --- | --- |
+| AWS IRSA | ServiceAccount `eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<name>` | the role's trust policy |
+| AWS Pod Identity | none | a Pod Identity association for the ServiceAccount |
+| GKE | none (federated principal bound to roles) or ServiceAccount `iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com` | `roles/iam.workloadIdentityUser` on the Google service account in the second form |
+| Azure | ServiceAccount `azure.workload.identity/client-id: <id>` (optional `.../tenant-id`) and pod template label `azure.workload.identity/use: "true"` | a federated identity credential for `system:serviceaccount:<ns>:<sa>` |
+
+### `CloudAuth` (credential kinds `DatabaseRole` and `CacheUser`)
+
+| Field | Type | Req | Default | Validation |
+| --- | --- | --- | --- | --- |
+| `authMode` | enum | no | `Password` | `Password`, `IAM`; immutable. `IAM` needs a cloud server (controller, `AuthModeUnsupported`) |
+| `iam.principal` | string | GCP and Azure with `IAM` | | maxLength 320; the consumer's cloud identity. Refused on AWS (controller, `IAMPrincipalRequired`) |
+
+CEL: `!has(self.iam) || self.authMode == 'IAM'`, and `self.authMode ==
+'Password' || !has(self.rotationPolicy)`. In `IAM` mode there is no rotation:
+`status.rotation` stays empty and `craftainer.dev/rotate` raises a Warning
+Event with reason `RotationUnsupported`. A claim cannot choose its external
+name, except that on Cloud SQL and Azure the database user is named by
+`iam.principal` (ownership marker and `NameCollision` still apply).
+
+Binding keys added on a cloud server: `cloud` (`aws`, `gcp`, `azure`),
+`authMode` (db and cache), `iamResourceArn` (AWS, `IAM`), `instanceConnectionName`
+(Cloud SQL), `region` (AWS db and cache). In `IAM` mode there is no `password`
+and no `uri` with one.
+
+### db × cloud
+
+`ClusterDatabaseServer` and `DatabaseServer` include `CloudServerCommon`
+(`adminCredentialsSecretRef` stays required). Target fields:
+
+| Cloud | Field | Req | Notes |
+| --- | --- | --- | --- |
+| `aws` | `dbInstanceIdentifier` or `dbClusterIdentifier` | exactly one | RDS instance, or Aurora cluster (writer endpoint); maxLength 63 |
+| `gcp` | `instance` | yes | with `project` and `location`; the connection name `project:location:instance` is derived; maxLength 98 |
+| `azure` | `serverName` | yes | PG flexible server in `resourceGroup`; 3 to 63 |
+
+```yaml
+apiVersion: db.craftainer.dev/v1alpha1
+kind: ClusterDatabaseServer
+metadata: {name: rds-orders}
+spec:
+  provider:
+    type: AWS
+    aws: {region: eu-west-1, dbInstanceIdentifier: orders-prod}
+  credentials: {source: WorkloadIdentity}
+  adminCredentialsSecretRef: {name: rds-admin, namespace: craftainer-system}
+  allowedNamespaces: {from: Selector, selector: {matchLabels: {craftainer.dev/db: allowed}}}
+---
+apiVersion: db.craftainer.dev/v1alpha1
+kind: DatabaseRole
+metadata: {name: orders-app, namespace: team-a}
+spec:
+  serverRef: {kind: ClusterDatabaseServer, name: rds-orders}
+  databaseRef: {name: orders}
+  authMode: IAM
+  binding: {secretName: orders-db}
+```
+
+`DatabaseRole` includes `CloudAuth`. In `IAM` mode the role is one login (no
+`_a`/`_b`) and `GRANT rds_iam` on RDS. Binding in `IAM` mode: `type`,
+`provider`, `cloud`, `authMode`, `host`, `port`, `database`, `username`,
+`sslmode`, `sslrootcert`, plus `iamResourceArn` (AWS: `arn:aws:rds-db:<region>:<account>:dbuser:<resourceId>/<role>`)
+or `instanceConnectionName` (Cloud SQL).
+
+### s3 × cloud
+
+`ClusterObjectStore` and `ObjectStore` include `CloudServerCommon`; no
+`adminCredentialsSecretRef`.
+
+| Cloud | Field | Notes |
+| --- | --- | --- |
+| `aws` | `iamPath` (default `/craftainer/`), `permissionsBoundaryARN` | for the IAM users that `BucketAccess` creates; buckets are created in `region` |
+| `gcp` | `project`, `location` | bucket location; `BucketAccess` uses a service account (the emulator has no HMAC keys) |
+| `azure` | `storageAccount` | 3 to 24 lowercase letters and digits; access by SAS or Entra RBAC, decided in NKs3-3 |
+
+`Bucket` status: `externalName` is the bucket, `externalId` its ARN or
+resource name. `BucketAccess × AWS`: `externalName` is the IAM user,
+`externalId` its ARN, `rotation.active` the access key ID; binding keys as
+before plus `cloud`.
+
+### cache × cloud
+
+`ClusterCacheServer` and `CacheServer` include `CloudServerCommon`; `provider.type`
+is `AWS` or `GCP` (Azure is deferred until the access-string API is GA).
+
+| Cloud | Field | Notes |
+| --- | --- | --- |
+| `aws` | `elasticache: {userGroupID, replicationGroupID}` or `memorydb: {aclName, clusterName}` | exactly one block; the group or ACL exists and is attached by the admin; ids maxLength 255 |
+| `gcp` | `memorystore: {instance}` | with `project` and `location` |
+
+`CacheUser` includes `CloudAuth`; its `profile` and `channels` apply as before
+(the key pattern stays `~<ns>:*`). `externalName` is the user id (at most 40
+characters on ElastiCache), `externalId` the user ARN or ACL policy name.
+Status mapping for the asynchronous ElastiCache and MemoryDB users (polled
+after each write, requeue 10 seconds):
+
+| Cloud status | `Ready` | `Synced` |
+| --- | --- | --- |
+| `creating` | `False`, `Creating` | `True` |
+| `modifying` | `False`, `Updating` | `True` |
+| `active` | `True`, `Available` | `True` |
+| `deleting` | `False`, `Deleting` | `True` |
+
+```yaml
+apiVersion: cache.craftainer.dev/v1alpha1
+kind: ClusterCacheServer
+metadata: {name: elasticache}
+spec:
+  provider:
+    type: AWS
+    aws:
+      region: eu-west-1
+      elasticache: {userGroupID: craftainer, replicationGroupID: sessions}
+  allowedNamespaces: {from: All}
+---
+apiVersion: cache.craftainer.dev/v1alpha1
+kind: CacheUser
+metadata: {name: session-store, namespace: team-a}
+spec:
+  serverRef: {kind: ClusterCacheServer, name: elasticache}
+  authMode: IAM
+```
+
+### mqtt × cloud
+
+`ClusterMqttBroker` and `MqttBroker` include `CloudServerCommon`;
+`provider.type` is `AWS` or `Azure` (GCP is dropped: no managed MQTT service
+since 2023). Target fields: AWS none beyond `region` (the data endpoint is
+read with `DescribeEndpoint`); Azure `eventGridNamespace` (in `resourceGroup`;
+the API is verified in NKmqtt-2).
+
+`MqttUser` on AWS has no `authMode`: the certificate is the credential. Binding
+keys: `type`, `provider`, `cloud`, `host`, `port` (`8883`), `protocol`
+(`mqtts`), `endpoint` (`mqtts://<host>:8883`), `clientId`, `certificate.pem`,
+`private-key.pem`, `topicRoot`. No `username`, `password` or `sslrootcert`.
+`externalName` is the IoT policy name, `externalId` the active certificate ARN,
+`rotation.active` the certificate ID. Rotation replaces the certificate
+(`RotateBegin` creates and attaches, `RotateFinish` deactivates, detaches and
+deletes the old one after the grace period); the private key is never logged.
+
+```yaml
+apiVersion: mqtt.craftainer.dev/v1alpha1
+kind: ClusterMqttBroker
+metadata: {name: iot-core}
+spec:
+  provider: {type: AWS, aws: {region: eu-west-1}}
+  allowedNamespaces: {from: All}
+---
+apiVersion: mqtt.craftainer.dev/v1alpha1
+kind: MqttUser
+metadata: {name: sensor-gateway, namespace: team-a}
+spec:
+  serverRef: {kind: ClusterMqttBroker, name: iot-core}
+  acls: [{topic: "sensors/+/telemetry", access: Publish}]
+  rotationPolicy: {interval: 2160h, gracePeriod: 24h}
+```
+
+### oidc × cloud
+
+The discriminator is the existing `type`, extended with `Cognito` and
+`Entra`; there is no `provider` field in this group (open question 1).
+`ClusterIdentityProvider` and `IdentityProvider` add `credentials` and:
+
+| Field | Type | Req | Validation |
+| --- | --- | --- | --- |
+| `cognito.region` | string | with `Cognito` | as `provider.aws.region` |
+| `cognito.userPoolID` | string | with `Cognito` | `^[\w-]+_[0-9A-Za-z]+$`, maxLength 55 |
+| `cognito.domain` | string | with `Cognito` | hosted-UI domain prefix or custom domain, maxLength 255 |
+| `cognito.roleARN` | string | no | as `provider.aws.roleARN` |
+| `entra.tenantID` | string | with `Entra` | GUID |
+
+CEL: exactly the block matching `type` is set; `issuer` is derived for the
+cloud types (so it is required only for `Keycloak` and `DynamicRegistration`);
+`credentials.source` follows the common rules (Azure `Secret` keys `clientId`
+and `clientSecret`). `OidcClient` is unchanged: `externalName` is the client
+name and `externalId` the Cognito app client ID, or the Entra application
+object ID (the binding's `clientId` is the app ID); the binding adds `cloud`.
+oidc × GCP is dropped (no general OAuth-client API), so there is no `GCP` value.
+
+```yaml
+apiVersion: oidc.craftainer.dev/v1alpha1
+kind: ClusterIdentityProvider
+metadata: {name: cognito}
+spec:
+  type: Cognito
+  cognito: {region: eu-west-1, userPoolID: eu-west-1_AbCdEf123, domain: team-auth}
+  credentials: {source: WorkloadIdentity}
+  allowedNamespaces: {from: All}
 ```
