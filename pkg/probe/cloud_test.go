@@ -190,6 +190,14 @@ func TestDiscoveredKeysFitTheSchema(t *testing.T) {
 	if len(d) != 2 || d[strings.Repeat("a", probe.MaxDiscoveredKeyLength)] != "long key" || d["bb"] != "bad key" {
 		t.Errorf("discovered = %v", d)
 	}
+	// Two keys that clean to one: the first in order wins, always.
+	p.res.Discovered = map[string]string{"a\xff": "second", "a": "first"}
+	if _, err := runCloud(context.Background(), c, getCloudTeam(t, c), p, opts(&clock{t0})); err != nil {
+		t.Fatal(err)
+	}
+	if d := getCloudTeam(t, c).Status.Discovered; len(d) != 1 || d["a"] != "first" {
+		t.Errorf("discovered = %v", d)
+	}
 	// Nothing usable left: the field is cleared.
 	p.res.Discovered = map[string]string{"": "x"}
 	if _, err := runCloud(context.Background(), c, getCloudTeam(t, c), p, opts(&clock{t0})); err != nil {

@@ -438,8 +438,8 @@ func cleanDiscovered(in map[string]string) map[string]string {
 	out := make(map[string]string, min(len(in), MaxDiscovered))
 	for _, k := range slices.Sorted(maps.Keys(in)) {
 		key := truncate(strings.ToValidUTF8(k, ""), MaxDiscoveredKeyLength)
-		if key == "" || len(out) >= MaxDiscovered {
-			continue
+		if _, taken := out[key]; taken || key == "" || len(out) >= MaxDiscovered {
+			continue // the first key in order wins a collision after cleaning
 		}
 		out[key] = truncate(strings.ToValidUTF8(in[k], ""), MaxDiscoveredLength)
 	}
