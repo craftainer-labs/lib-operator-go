@@ -59,12 +59,12 @@ func TestCachedSourceRefreshesBeforeExpiry(t *testing.T) {
 		want    string
 	}{
 		{0, "t1"},
-		{5 * time.Minute, "t1"},   // 10 minutes left
-		{7 * time.Minute, "t1"},   // 3 minutes left, outside the margin
-		{time.Minute, "t2"},       // 2 minutes left: inside the margin, so refreshed
-		{12 * time.Minute, "t2"},  // 2 minutes + 12 > the new token's life? new token has 15m from the refresh: 3 left
-		{time.Minute, "t3"},       // 2 left again
-		{30 * time.Minute, "t4"},  // long after expiry
+		{5 * time.Minute, "t1"},  // 10 minutes left
+		{7 * time.Minute, "t1"},  // 3 minutes left, outside the margin
+		{time.Minute, "t2"},      // 2 minutes left: inside the margin, so refreshed
+		{12 * time.Minute, "t2"}, // 2 minutes + 12 > the new token's life? new token has 15m from the refresh: 3 left
+		{time.Minute, "t3"},      // 2 left again
+		{30 * time.Minute, "t4"}, // long after expiry
 	}
 	for i, s := range steps {
 		clock = clock.Add(s.advance)

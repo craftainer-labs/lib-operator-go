@@ -121,10 +121,10 @@ func TestAzureSecretErrorsCarryNoSecret(t *testing.T) {
 		tenant string
 		secret map[string][]byte
 	}{
-		"nil":                {testTenant, nil},
-		"no client secret":   {testTenant, map[string][]byte{KeyAzureClientID: []byte("id-LEAK-CHECK")}},
-		"no client id":       {testTenant, map[string][]byte{KeyAzureClientSecret: []byte("secret-LEAK-CHECK")}},
-		"blank":              {testTenant, map[string][]byte{KeyAzureClientID: []byte(" "), KeyAzureClientSecret: []byte("secret-LEAK-CHECK")}},
+		"nil":                 {testTenant, nil},
+		"no client secret":    {testTenant, map[string][]byte{KeyAzureClientID: []byte("id-LEAK-CHECK")}},
+		"no client id":        {testTenant, map[string][]byte{KeyAzureClientSecret: []byte("secret-LEAK-CHECK")}},
+		"blank":               {testTenant, map[string][]byte{KeyAzureClientID: []byte(" "), KeyAzureClientSecret: []byte("secret-LEAK-CHECK")}},
 		"tenant is not an ID": {"not a tenant!", azureKeys()},
 	}
 	for name, tt := range tests {
