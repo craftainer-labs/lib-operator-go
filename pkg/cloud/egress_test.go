@@ -194,7 +194,7 @@ func TestRedirects(t *testing.T) {
 		case "/loop":
 			http.Redirect(w, r, "/loop", http.StatusFound)
 		case "/downgrade":
-			http.Redirect(w, r, "http://"+r.Host+"/done", http.StatusFound)
+			http.Redirect(w, r, "http://"+self.Listener.Addr().String()+"/done", http.StatusFound)
 		}
 	}, true)
 	e := openEgress()
