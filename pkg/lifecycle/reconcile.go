@@ -380,10 +380,14 @@ func (r *run[S, O]) blocked(reason, msg string, warn bool) (ctrl.Result, error) 
 	return r.done("Observe", reason, r.requeue(), nil)
 }
 
-// failed records an error from the External and decides how to retry: a name
+// failed records an error from the External and decides how to retry: a
+// PendingError is requeued after its own interval (see PendingError); a name
 // collision is requeued at the poll interval without error (backoff will not
 // fix it); everything else is returned so controller-runtime backs off.
 func (r *run[S, O]) failed(action string, err error) (ctrl.Result, error) {
+	if p, ok := asPending(err); ok {
+		return r.pending(action, p)
+	}
 	msg := action + ": " + err.Error()
 	switch {
 	case errors.Is(err, ErrNameCollision):

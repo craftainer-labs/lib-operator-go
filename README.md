@@ -21,11 +21,12 @@ in [`docs/crd-drafts.md`](docs/crd-drafts.md). The FIPS CI job and the
 | Package | Purpose |
 | --- | --- |
 | `pkg/apis/common` | Shared API types: conditions, references, management policies, selectors |
-| `pkg/lifecycle` | `External`, `Rotator` and `Claim` interfaces and `Reconcile`, delete and rotation handling |
+| `pkg/lifecycle` | `External`, `Rotator` and `Claim` interfaces and `Reconcile`, delete and rotation handling; `PendingError` for a backend that is still changing state |
 | `pkg/lifecycle/lifecycletest` | Fakes for testing operators built on `pkg/lifecycle` |
 | `pkg/server` | `Resolve`: server lookup that enforces `allowedNamespaces`; `ConnectionFor`: a server's own connection settings |
 | `pkg/probe` | `Prober` and `Reconciler`: write a server kind's `ServerStatus` (version, probe time, `Ready`, `ServerReachable`) |
 | `pkg/egress` | `Policy`, `Dialer` and `HostDialer`: block backend connections to loopback, link-local, metadata, special-purpose (and in `strict` mode private) addresses after name resolution, through an optional proxy, with a bounded tunnel set-up |
+| `pkg/cloud` | Cloud providers (AWS, GCP, Azure): the API types operators embed, credential resolution (workload identity or Secret), `endpointOverride` gated on the egress mode, SDK HTTP clients that dial through `pkg/egress`, and token sources for IAM logins (RDS, Entra, Memorystore) |
 | `pkg/binding` | `WriteSecret`: `servicebinding.io/<type>` Secrets |
 | `pkg/naming` | `Tenant`: deterministic, collision-safe external names |
 | `pkg/conditions` | `Ready`, `Synced`, `ServerReachable` |
