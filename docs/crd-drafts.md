@@ -254,9 +254,9 @@ Includes `ServerCommon`. Admin Secret keys: `accessKey`, `secretKey`.
 | Field | Type | Req | Default | Validation |
 | --- | --- | --- | --- | --- |
 | `endpoint` | string | yes | | `https` URL, maxLength 512 (CEL: `self.startsWith('https://')`) |
-| `region` | string | no | `us-east-1` | maxLength 64 |
-| `pathStyle` | bool | no | `true` | |
-| `backend` | enum | no | `RustFS` | `RustFS` (MinIO is unsupported; `AWS` later) |
+| `region` | string | no | controller default `us-east-1` (no schema default; ADR 0002 section 16.8) | maxLength 64; self-hosted only (CEL: forbidden with `provider`) |
+| `pathStyle` | bool | no | controller default `true` | self-hosted only (forbidden with `provider`) |
+| `backend` | enum | no | controller default `RustFS` | `RustFS` (MinIO is unsupported; the clouds are `provider`); forbidden with `provider` |
 
 The admin API is `<endpoint>/rustfs/admin/v3` (SigV4). Cluster kind also takes
 `allowedNamespaces`. Status: `ServerStatus`.
@@ -595,6 +595,7 @@ fields listed under its group):
 | `gcp` | `location` | string | where regional | maxLength 64 |
 | `azure` | `tenantID` | string | yes | GUID pattern |
 | `azure` | `subscriptionID`, `resourceGroup` | string | db, s3, mqtt | GUID; `^[-\w._()]{1,90}$`; absent for oidc (Graph) |
+| `azure` (db only) | `entraAdmin` | string | iff `adminAuthMode: IAM` | maxLength 128; the Entra principal name of the identity behind `credentials`, which logs in to the server as its Entra administrator. CEL: `adminAuthMode` is allowed only with `provider.type: Azure` and on cluster kinds; `IAM` requires `entraAdmin`; `entraAdmin` requires `IAM` |
 | every block | `endpointOverride` | string | no | cluster kinds only (CEL on namespaced kinds forbids it); `https` URL, or `http` with `EGRESS_MODE=allow-private`; honoured only in `allow-private` mode, otherwise `Ready=False`, reason `EndpointOverrideForbidden`. For emulators, never for production. maxLength 512 |
 
 Secret keys of `credentials.secretRef` (fixed, no `key`):
@@ -647,9 +648,11 @@ and no `uri` with one; a cache binding keeps `keyPrefix`, `sslrootcert` and the
 (`adminCredentialsSecretRef` stays required unless `adminAuthMode: IAM`).
 Extra field `adminAuthMode` (enum `Password` default, `IAM`; `IAM` only with
 `provider.type: Azure` in `v1alpha1`, CEL): `IAM` means the operator logs in
-as the Entra administrator named by `provider.azure.entraAdmin` (required with
-`IAM`, maxLength 128; name settled in NKdb-3) with its own token, and
-`adminCredentialsSecretRef` is then forbidden. Target fields:
+as the Entra administrator named by `provider.azure.entraAdmin` (see the
+`azure` table above; field name settled in NKdb-3) with a token for scope
+`https://ossrdbms-aad.database.windows.net/.default` from the identity behind
+`credentials`, and `adminCredentialsSecretRef` is then forbidden. Cluster
+kinds only. Target fields:
 
 | Cloud | Field | Req | Notes |
 | --- | --- | --- | --- |

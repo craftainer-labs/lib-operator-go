@@ -674,7 +674,8 @@ appends a name suffix and no budget is subtracted), so that holds unless the Rus
 limit turns out below 22, in which case the item escalates instead of
 shortening the hash.
 
-A claim can never choose an external name: there is no `spec.name` override,
+A claim can never choose an external name (one exception, IAM-mode database
+users on Cloud SQL and Azure: section 16.4): there is no `spec.name` override,
 so the derived name is the only path from a claim to a backend object.
 `Bucket`, `DatabaseRole` and similar kinds add a CEL rule on `metadata.name`
 that rejects characters outside the backend's set (for example, a `Bucket`
@@ -947,9 +948,12 @@ Rules (CEL on the server spec unless noted):
   It is therefore still required for `ClusterDatabaseServer` and
   `DatabaseServer` (the operator runs SQL as an administrator) unless
   `adminAuthMode: IAM` (decided, 16.8 question 4: `Password` by default;
-  `IAM` only on Azure in `v1alpha1`, where the operator logs in with its own
-  Entra token as the Entra administrator named by `provider.azure.entraAdmin`,
-  and then the Secret is forbidden), and forbidden
+  `IAM` only on Azure in `v1alpha1`, where the operator logs in as the Entra administrator
+  named by `provider.azure.entraAdmin`, with a token for scope
+  `https://ossrdbms-aad.database.windows.net/.default` from the same identity
+  as `credentials` (so `entraAdmin` is that identity's Entra principal name);
+  cluster kinds only, since a namespaced server may not use workload
+  identity; the Secret is then forbidden), and forbidden
   with a provider on the s3, mqtt, cache and oidc server kinds, whose cloud
   API credential is `credentials`. Self-hosted servers are unchanged.
 - Server `status` gains `discovered` (map of string, maxProperties 10, values
@@ -973,7 +977,7 @@ operator pod's identity. The controller code calls no cloud API for it:
 | Cloud | Chain the SDK walks | What the user sets up |
 | --- | --- | --- |
 | AWS | `aws-sdk-go-v2` default config: `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN` (IRSA), or `AWS_CONTAINER_CREDENTIALS_FULL_URI` + token file (EKS Pod Identity) | IRSA: annotate the operator's ServiceAccount `eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<name>`. Pod Identity: no annotation; a Pod Identity association for the ServiceAccount (`aws eks create-pod-identity-association`). Either way the role's trust policy is the user's |
-| GCP | Application Default Credentials: the GKE metadata server (Workload Identity Federation for GKE) or an `external_account` file | Preferred: grant IAM roles directly to the federated principal `principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/<operator-ns>/sa/<sa>`, no annotation. Alternative: annotate the ServiceAccount `iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com` and bind `roles/iam.workloadIdentityUser` |
+| GCP | Application Default Credentials: the GKE metadata server (Workload Identity Federation for GKE) or an `external_account` file (the platform's own ADC; a tenant's Secret may not use it, see the `Secret` table) | Preferred: grant IAM roles directly to the federated principal `principal://iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<project>.svc.id.goog/subject/ns/<operator-ns>/sa/<sa>`, no annotation. Alternative: annotate the ServiceAccount `iam.gke.io/gcp-service-account: <gsa>@<project>.iam.gserviceaccount.com` and bind `roles/iam.workloadIdentityUser` |
 | Azure | `azidentity` `DefaultAzureCredential` / `WorkloadIdentityCredential`: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE` | annotate the ServiceAccount `azure.workload.identity/client-id: <client id>` (optional `azure.workload.identity/tenant-id`), put the pod label `azure.workload.identity/use: "true"` on the operator's pod template (the webhook only mutates labelled pods), and create the federated identity credential for the issuer and subject `system:serviceaccount:<ns>:<sa>` |
 
 The operator never creates, edits or deletes its own identity: not the IAM
@@ -1024,7 +1028,7 @@ them are the operator's own.
 | --- | --- | --- |
 | `aws` | `region` (required; pattern `^[a-z]{2}(-[a-z]+)+-[0-9]+$`, maxLength 32), `roleARN` (optional; AssumeRole from the source credentials; `arn:` prefix by CEL, maxLength 2048), `endpointOverride` | the AWS partition follows from the region and from `roleARN` |
 | `gcp` | `project` (required; project ID pattern, maxLength 30), `location` (region; required where the resource is regional), `endpointOverride` | |
-| `azure` | `tenantID` (required; GUID), `subscriptionID` and `resourceGroup` (required for the ARM-based operators db, s3, mqtt; absent for oidc, which talks to Graph), `endpointOverride` | |
+| `azure` | `tenantID` (required; GUID), `subscriptionID` and `resourceGroup` (required for the ARM-based operators db, s3, mqtt; absent for oidc, which talks to Graph), `endpointOverride`; db only: `entraAdmin` (see 16.1, `adminAuthMode`) | |
 
 What identifies the target, per operator (an `allowedNamespaces` selector and
 the naming rules apply as before):
@@ -1102,10 +1106,10 @@ spec:
 
 - Deviation from section 10 ("a claim can never choose an external name"): on
   Cloud SQL and Azure the database user's name must be the principal's name, so
-  in those two modes `iam.principal` is chosen by the claim. If this section is
-  accepted, section 10's sentence is amended to say "except the database user
-  of an IAM-mode claim on Cloud SQL and Azure"; until then section 10 stands
-  as written and this is the one exception. The check runs in PostgreSQL on
+  in those two modes `iam.principal` is chosen by the claim. This is
+  the one exception to section 10's sentence: "except the database user of an
+  IAM-mode claim on Cloud SQL and Azure". Section 10's Decision text is not
+  edited (it is Accepted); it carries a one-line pointer to this paragraph. The check runs in PostgreSQL on
   the role, not on the cloud API object: before `users.insert` or
   `pgaadauth_create_principal` the operator requires that no role of that name
   exists (otherwise `NameCollision`), and right after it sets the section 10
@@ -1117,7 +1121,8 @@ spec:
   still name any principal in the project and give it access to its own
   database; it gains nothing outside that database. An optional
   allow-list of principals on cluster servers was considered and not adopted
-  (16.8 question 6); it can be added later without breaking the API.
+  (16.8 question 6). Adding it later as an optional field, empty by default, is
+  additive; making it mandatory would be breaking.
 - IAM-mode paths have no emulator that validates tokens (plan, NKR1). They get
   unit tests against recorded API shapes, and their NFR verification says
   "untested in CI" until a real-cloud lane exists.
@@ -1252,6 +1257,11 @@ library (decided, 16.8 question 8).
 
 #### 16.8 Decisions (user, 2026-11-16)
 
+These decisions bind from now: NK0 and the NK* items are written to them.
+The section stays Proposed in the ADR until NK0 merges. Until then a change
+is an edit of this section with a new decision-log entry; after that, a new
+ADR that supersedes it, as `docs/adrs/README.md` says.
+
 The user accepted the lean of all eleven questions. The tables above are the
 decided shapes. Each line records the question and what was decided; the
 rejected options are named so a later change can find them.
@@ -1278,7 +1288,7 @@ rejected options are named so a later change can find them.
    reserved `certificates` and `private-key`.
 6. **IAM principals as role names.** Decided: the marker plus `NameCollision`
    protection of 16.4, no `allowedPrincipals` allow-list for now; it can be
-   added later, additively, when a user asks.
+   added later as an optional, empty-by-default field when a user asks.
 7. **Immutability.** Decided: `authMode` and `provider.type` are both
    immutable; a change means a new claim or server.
 8. **Async polling in the library.** Decided: add the "pending, requeue in X"
