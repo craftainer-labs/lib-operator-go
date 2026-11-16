@@ -102,6 +102,16 @@ func TestAzureWorkloadIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The override keeps the public cloud's services, in a map of its own.
+	if len(c.ClientOptions.Cloud.Services) == 0 || len(c.ClientOptions.Cloud.Services) != len(plain.ClientOptions.Cloud.Services) {
+		t.Errorf("services = %v", c.ClientOptions.Cloud.Services)
+	}
+	for k := range c.ClientOptions.Cloud.Services {
+		delete(c.ClientOptions.Cloud.Services, k)
+	}
+	if len(plain.ClientOptions.Cloud.Services) == 0 || len(azcloud.AzurePublic.Services) == 0 {
+		t.Error("the services map is shared")
+	}
 	tok, _, err := AzureTokenSource(c.Credential, AzurePostgresScope).Token(t.Context())
 	if err != nil || tok != "entra-fake-token" {
 		t.Fatalf("Token = %q, %v", tok, err)

@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -62,9 +63,9 @@ func (e Egress) Azure(_ context.Context, scope Scope, p AzureClusterBlock, c *Cr
 	}
 	// An explicit cloud also keeps AZURE_AUTHORITY_HOST from choosing the
 	// authority; sovereign clouds are out of v1alpha1 (ADR 0002, 16.8).
-	co := azcore.ClientOptions{Transport: hc, Cloud: azcloud.AzurePublic}
+	co := azcore.ClientOptions{Transport: hc, Cloud: publicCloud()}
 	if endpoint != "" {
-		co.Cloud = azcloud.Configuration{ActiveDirectoryAuthorityHost: endpoint}
+		co.Cloud.ActiveDirectoryAuthorityHost = endpoint
 	}
 	var cred azcore.TokenCredential
 	if src == SourceSecret {
@@ -99,6 +100,14 @@ func azureSecret(tenant string, secret map[string][]byte, co azcore.ClientOption
 		return nil, fmt.Errorf("%w: the Azure client secret credential is invalid", ErrCredentialsUnavailable)
 	}
 	return cred, nil
+}
+
+// publicCloud is a private copy of the public cloud's configuration: the
+// Services map is shared by the SDK's global, and a caller may add to ours.
+func publicCloud() azcloud.Configuration {
+	c := azcloud.AzurePublic
+	c.Services = maps.Clone(c.Services)
+	return c
 }
 
 // AzureTokenSource returns the TokenSource of an Entra token for scope

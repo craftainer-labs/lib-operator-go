@@ -178,6 +178,18 @@ func TestRDSTokenSource(t *testing.T) {
 		t.Errorf("expiry %v is not 15 minutes from issue", exp)
 	}
 
+	// The token is signed with the credentials whose expiry it reports, not with
+	// a second retrieval.
+	var calls int
+	rotating := aws.Config{Region: "eu-west-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		calls++
+		return aws.Credentials{AccessKeyID: fmt.Sprintf("ASIAKEY%d", calls), SecretAccessKey: "fake-secret-key"}, nil
+	})}
+	rot, _, err := RDSTokenSource(rotating, "db.example.test:5432", "app_role").Token(t.Context())
+	if err != nil || calls != 1 || !strings.Contains(rot, "ASIAKEY1") {
+		t.Errorf("retrievals = %d, token %q, %v", calls, rot, err)
+	}
+
 	// The token cannot outlive the credentials that signed it.
 	soon := time.Now().Add(2 * time.Minute)
 	short := aws.Config{Region: "eu-west-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
