@@ -50,6 +50,8 @@ const (
 	// this many bytes.
 	MaxDiscovered       = 10
 	MaxDiscoveredLength = 512
+	// MaxDiscoveredKeyLength is the longest key kept, in bytes.
+	MaxDiscoveredKeyLength = 63
 
 	// jitterFraction is the largest share added to the probe interval.
 	jitterFraction = 0.1
@@ -110,7 +112,9 @@ type CloudResult struct {
 	// Discovered becomes ServerStatus.Discovered: endpoint, port, resourceId,
 	// accountId, region. It is cut to the schema (MaxDiscovered entries, the
 	// first by key, each value at most MaxDiscoveredLength bytes of valid
-	// UTF-8), and a nil or empty map clears the field.
+	// UTF-8), and a nil or empty map clears the field. A failed probe or an
+	// unreadable connection leaves the last known value, as it does for the
+	// version; the Ready condition says the server is not usable.
 	Discovered map[string]string
 }
 
@@ -220,7 +224,8 @@ type Reconciler struct {
 	// (or beside) the admin Secret: one that is in a forbidden namespace gives
 	// Ready=False, ServerReachable=False, reason CredentialsNamespaceForbidden;
 	// one that is missing gives Ready=False, ServerReachable=Unknown, reason
-	// CredentialsUnavailable. Both are set, or neither.
+	// CredentialsUnavailable. NewCloud needs CloudProber, and replaces New:
+	// SetupWithManager fails if CloudProber is nil or New is set too.
 	NewCloud    func() CloudServer
 	CloudProber CloudProber
 	// Controller are the options of the controller SetupWithManager builds,
@@ -421,17 +426,25 @@ func truncate(v string, n int) string {
 	return v[:n]
 }
 
-// cleanDiscovered makes a discovered map fit the schema: at most MaxDiscovered
-// entries (the first by key, so the same input always gives the same output),
-// each value valid UTF-8 and at most MaxDiscoveredLength bytes. An empty map is
-// nil.
+// cleanDiscovered makes a discovered map fit the schema: keys and values valid
+// UTF-8 (a key at most MaxDiscoveredKeyLength bytes, a value
+// MaxDiscoveredLength), an empty key dropped, and at most MaxDiscovered entries
+// (the first by key, so the same input always gives the same output). An empty
+// result is nil.
 func cleanDiscovered(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
 	}
 	out := make(map[string]string, min(len(in), MaxDiscovered))
-	for _, k := range slices.Sorted(maps.Keys(in))[:min(len(in), MaxDiscovered)] {
-		out[k] = truncate(strings.ToValidUTF8(in[k], ""), MaxDiscoveredLength)
+	for _, k := range slices.Sorted(maps.Keys(in)) {
+		key := truncate(strings.ToValidUTF8(k, ""), MaxDiscoveredKeyLength)
+		if key == "" || len(out) >= MaxDiscovered {
+			continue
+		}
+		out[key] = truncate(strings.ToValidUTF8(in[k], ""), MaxDiscoveredLength)
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -464,6 +477,9 @@ func predicates() predicate.Predicate { return predicate.GenerationChangedPredic
 // named after the kind, so an operator with several server kinds calls it once
 // for each.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.NewCloud != nil && (r.CloudProber == nil || r.New != nil) {
+		return errors.New("probe: NewCloud needs a CloudProber and replaces New")
+	}
 	var kind client.Object
 	uses, usesCM := serverUses(usesSecret), serverUses(usesConfigMap)
 	if r.NewCloud != nil {

@@ -253,6 +253,26 @@ func TestCloudCredentialsSecret(t *testing.T) {
 			t.Errorf("err = %v", err)
 		}
 	})
+	t.Run("a forbidden credentials namespace is reported before any other Secret is read", func(t *testing.T) {
+		c := newClient(t, nil, cloudCluster(func(s *testapi.ClusterCloudWidgetServer) {
+			s.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "missing", Namespace: opNS}
+			s.Spec.CredentialsSecret = &common.AdminSecretRef{Name: "creds", Namespace: "tenant"}
+		}))
+		conn, err := server.ResolveCloud(ctx, c, "team-a", cloudClusterRef, server.WithOperatorNamespace(opNS))
+		if !errors.Is(err, server.ErrCredentialsSecretNamespaceForbidden) || conn.Admin != nil || conn.Credentials != nil || conn.Endpoint != "" {
+			t.Errorf("conn = %+v, err = %v", conn, err)
+		}
+	})
+	t.Run("an error leaves no Secret data in the connection", func(t *testing.T) {
+		c := newClient(t, nil, cloudNamespaced(func(s *testapi.CloudWidgetServer) {
+			s.Spec.AdminCredentialsSecretRef = &common.AdminSecretRef{Name: "admin"}
+			s.Spec.CredentialsSecret = &common.AdminSecretRef{Name: "creds"}
+		}), adminSecret("team-a"))
+		conn, err := server.ResolveCloud(ctx, c, "team-a", cloudNamespacedRef)
+		if !errors.Is(err, server.ErrCredentialsUnavailable) || conn.Admin != nil || conn.Credentials != nil {
+			t.Errorf("conn = %+v, err = %v", conn, err)
+		}
+	})
 	t.Run("a bad connection setting fails before the credentials are read", func(t *testing.T) {
 		c := newClient(t, nil, cloudNamespaced(func(s *testapi.CloudWidgetServer) {
 			s.Spec.ProxyURL = "ftp://proxy"

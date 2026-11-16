@@ -284,8 +284,18 @@ func TestSetupWithManagerOfACloudKind(t *testing.T) {
 	if err := r.SetupWithManager(mgr); err != nil {
 		t.Error(err)
 	}
-	cluster := &probe.Reconciler{Client: mgr.GetClient(), NewCloud: func() probe.CloudServer { return &testapi.ClusterCloudWidgetServer{} }}
+	cluster := &probe.Reconciler{Client: mgr.GetClient(), CloudProber: r.CloudProber,
+		NewCloud: func() probe.CloudServer { return &testapi.ClusterCloudWidgetServer{} }}
 	if err := cluster.SetupWithManager(mgr); err != nil {
 		t.Error(err)
+	}
+	// NewCloud needs a CloudProber and replaces New.
+	noProber := &probe.Reconciler{Client: mgr.GetClient(), NewCloud: r.NewCloud}
+	both := &probe.Reconciler{Client: mgr.GetClient(), NewCloud: r.NewCloud, CloudProber: r.CloudProber,
+		New: func() probe.Server { return &testapi.WidgetServer{} }}
+	for name, bad := range map[string]*probe.Reconciler{"no CloudProber": noProber, "New as well": both} {
+		if err := bad.SetupWithManager(mgr); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
 	}
 }

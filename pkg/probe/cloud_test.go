@@ -176,6 +176,30 @@ func TestDiscoveredFitsTheSchema(t *testing.T) {
 	}
 }
 
+func TestDiscoveredKeysFitTheSchema(t *testing.T) {
+	c := newClient(t, interceptor.Funcs{}, cloudTeam(nil))
+	p := &cloudStub{res: probe.CloudResult{Discovered: map[string]string{
+		"":                       "dropped",
+		strings.Repeat("a", 100): "long key",
+		"b\xffb":                 "bad key",
+	}}}
+	if _, err := runCloud(context.Background(), c, getCloudTeam(t, c), p, opts(&clock{t0})); err != nil {
+		t.Fatal(err)
+	}
+	d := getCloudTeam(t, c).Status.Discovered
+	if len(d) != 2 || d[strings.Repeat("a", probe.MaxDiscoveredKeyLength)] != "long key" || d["bb"] != "bad key" {
+		t.Errorf("discovered = %v", d)
+	}
+	// Nothing usable left: the field is cleared.
+	p.res.Discovered = map[string]string{"": "x"}
+	if _, err := runCloud(context.Background(), c, getCloudTeam(t, c), p, opts(&clock{t0})); err != nil {
+		t.Fatal(err)
+	}
+	if d := getCloudTeam(t, c).Status.Discovered; d != nil {
+		t.Errorf("discovered = %v, want none", d)
+	}
+}
+
 func TestSelfHostedProbeNeverTouchesDiscovered(t *testing.T) {
 	srv := teamServer(func(s *testapi.WidgetServer) { s.Status.Discovered = map[string]string{"endpoint": "kept"} })
 	c := newClient(t, interceptor.Funcs{}, srv, admin("team-a"))

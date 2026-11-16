@@ -61,7 +61,9 @@ type CloudConnection struct {
 // is empty. The credentials Secret is read only when the server names one.
 // Both and the CA bundle come from the operator namespace (cluster server) or
 // the claim's namespace (namespaced server); a credentials Secret in any other
-// namespace is ErrCredentialsSecretNamespaceForbidden.
+// namespace is ErrCredentialsSecretNamespaceForbidden. A kind that is not a
+// CloudServer (a self-hosted kind, for Resolve) is ErrUnknownServerKind. On an
+// error the connection is empty.
 func ResolveCloud(ctx context.Context, c client.Client, claimNS string, ref Ref, opts ...Option) (CloudConnection, error) {
 	cfg := newConfig(opts)
 	srv, secretNS, err := find[CloudServer](ctx, c, claimNS, ref, cfg)
@@ -91,6 +93,12 @@ func ConnectionForCloud(ctx context.Context, c client.Client, srv CloudServer, o
 
 func cloudConnection(ctx context.Context, c client.Client, srv CloudServer, secretNS string, cfg config) (CloudConnection, error) {
 	cm := srv.GetCloudCommon()
+	// The credentials namespace is checked before any Secret is read, as the
+	// admin Secret's is, so a forbidden one is reported as such.
+	name, ns := srv.GetCredentialsSecret()
+	if name != "" && ns != "" && ns != secretNS {
+		return CloudConnection{}, fmt.Errorf("%w: %q, want %q", ErrCredentialsSecretNamespaceForbidden, ns, secretNS)
+	}
 	conn, err := connection(ctx, c, secretNS, cfg, connSpec{
 		endpoint: srv.GetEndpoint(), tls: cm.TLS, proxyURL: cm.ProxyURL,
 		interval: cm.HealthCheckInterval, admin: cm.AdminCredentialsSecretRef,
@@ -99,12 +107,8 @@ func cloudConnection(ctx context.Context, c client.Client, srv CloudServer, secr
 		return CloudConnection{}, err
 	}
 	out := CloudConnection{Connection: conn}
-	name, ns := srv.GetCredentialsSecret()
 	if name == "" {
 		return out, nil
-	}
-	if ns != "" && ns != secretNS {
-		return CloudConnection{}, fmt.Errorf("%w: %q, want %q", ErrCredentialsSecretNamespaceForbidden, ns, secretNS)
 	}
 	if out.Credentials, err = secretData(ctx, c, secretNS, name); err != nil {
 		if apierrors.IsNotFound(err) {
