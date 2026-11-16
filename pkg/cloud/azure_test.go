@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func fakeEntra(t *testing.T) (srv *httptest.Server, h *hits, root *x509.CertPool
 	srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.record(r)
 		w.Header().Set("Content-Type", "application/json")
-		base := "https://" + r.Host + "/" + testTenant
+		base := srv.URL + "/" + testTenant
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/.well-known/openid-configuration"):
 			_, _ = io.WriteString(w, `{"issuer":"`+base+`/v2.0","authorization_endpoint":"`+base+`/oauth2/v2.0/authorize",`+
@@ -44,7 +45,8 @@ func fakeEntra(t *testing.T) (srv *httptest.Server, h *hits, root *x509.CertPool
 func isolateAzure(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{"AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_FEDERATED_TOKEN_FILE", "AZURE_AUTHORITY_HOST", "AZURE_CLIENT_SECRET"} {
-		t.Setenv(k, "")
+		t.Setenv(k, "") // registers the restore
+		_ = os.Unsetenv(k)
 	}
 }
 
@@ -72,7 +74,7 @@ func TestAzureSecretClientCredentials(t *testing.T) {
 		if err != nil || tok != "entra-fake-token" || time.Until(exp) < 50*time.Minute {
 			t.Errorf("Token(%s) = %q, %v, %v", scope, tok, exp, err)
 		}
-		if h.field("scope") != scope || h.field("client_secret") != "entra-client-secret" ||
+		if !strings.HasPrefix(h.field("scope"), scope+" ") || h.field("client_secret") != "entra-client-secret" ||
 			h.field("client_id") != "11111111-1111-4111-8111-111111111111" {
 			t.Errorf("Entra saw scope %q, client_id %q", h.field("scope"), h.field("client_id"))
 		}

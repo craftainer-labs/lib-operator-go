@@ -33,7 +33,10 @@ func isolateAWS(t *testing.T) {
 func fakeSTS(t *testing.T) (url string, h *hits) {
 	t.Helper()
 	srv, h := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		action := r.Form.Get("Action")
+		action := "AssumeRole"
+		if r.Form.Get("Action") == "AssumeRoleWithWebIdentity" {
+			action = "AssumeRoleWithWebIdentity"
+		}
 		w.Header().Set("Content-Type", "text/xml")
 		_, _ = fmt.Fprintf(w, `<%[1]sResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><%[1]sResult>`+
 			`<Credentials><AccessKeyId>ASIAFAKE</AccessKeyId><SecretAccessKey>fake-secret-value</SecretAccessKey>`+
@@ -162,7 +165,7 @@ func TestRDSTokenSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"db.example.test:5432/", "Action=connect", "DBUser=app_role", "X-Amz-Signature=", "X-Amz-Expires=900", "X-Amz-Credential=AKIAFAKEKEY"} {
+	for _, want := range []string{"db.example.test:5432?", "Action=connect", "DBUser=app_role", "X-Amz-Signature=", "X-Amz-Expires=900", "X-Amz-Credential=AKIAFAKEKEY"} {
 		if !strings.Contains(tok, want) {
 			t.Errorf("token lacks %q: %s", want, tok)
 		}

@@ -16,7 +16,7 @@ func fakeGoogleOAuth(t *testing.T, tokenType string) (url string, h *hits) {
 	t.Helper()
 	srv, h := newServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		body := `{"access_token":"ya29.fake-access-token","expires_in":3600`
+		body := `{"access_token":"fake-google-token","expires_in":3600`
 		if tokenType != "" {
 			body += `,"token_type":"` + tokenType + `"`
 		}
@@ -31,9 +31,7 @@ var gcpCreds = &Credentials{Source: SourceSecret, SecretRef: &SecretRef{Name: "g
 
 func TestGCPSecretServiceAccount(t *testing.T) {
 	oauth, h := fakeGoogleOAuth(t, "Bearer")
-	api, apiHits := newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.WriteString(w, r.Header.Get("Authorization"))
-	})
+	api, apiHits := newServer(t, func(http.ResponseWriter, *http.Request) {})
 	p := GCPClusterBlock{GCPBlock: GCPBlock{Project: "proj-12345"}, EndpointOverride: api.URL}
 	c, err := openEgress().GCP(t.Context(), ScopeCluster, p, gcpCreds, gcpSecret(serviceAccountJSON(t, oauth)))
 	if err != nil {
@@ -44,7 +42,7 @@ func TestGCPSecretServiceAccount(t *testing.T) {
 	}
 
 	tok, exp, err := GCPTokenSource(c.Credentials).Token(t.Context())
-	if err != nil || tok != "ya29.fake-access-token" || time.Until(exp) < 50*time.Minute {
+	if err != nil || tok != "fake-google-token" || time.Until(exp) < 50*time.Minute {
 		t.Errorf("Token = %q, %v, %v", tok, exp, err)
 	}
 	if h.count() != 1 || h.field("grant_type") != "urn:ietf:params:oauth:grant-type:jwt-bearer" || h.field("assertion") == "" {
@@ -56,10 +54,9 @@ func TestGCPSecretServiceAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
-	if string(body) != "Bearer ya29.fake-access-token" || apiHits.count() != 1 {
-		t.Errorf("the API saw Authorization %q in %d requests", body, apiHits.count())
+	_ = resp.Body.Close()
+	if got := apiHits.authorization(); got != "Bearer fake-google-token" || apiHits.count() != 1 {
+		t.Errorf("the API saw Authorization %q in %d requests", got, apiHits.count())
 	}
 	if req.Header.Get("Authorization") != "" {
 		t.Error("the caller's request was modified")
@@ -68,7 +65,7 @@ func TestGCPSecretServiceAccount(t *testing.T) {
 
 func TestGCPTokenWithoutATypeIsBearer(t *testing.T) {
 	oauth, _ := fakeGoogleOAuth(t, "")
-	api, _ := newServer(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, r.Header.Get("Authorization")) })
+	api, apiHits := newServer(t, func(http.ResponseWriter, *http.Request) {})
 	c, err := openEgress().GCP(t.Context(), ScopeNamespaced, GCPClusterBlock{}, gcpCreds, gcpSecret(serviceAccountJSON(t, oauth)), "scope-a", "scope-b")
 	if err != nil {
 		t.Fatal(err)
@@ -77,9 +74,9 @@ func TestGCPTokenWithoutATypeIsBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if body, _ := io.ReadAll(resp.Body); string(body) != "Bearer ya29.fake-access-token" {
-		t.Errorf("Authorization = %q", body)
+	_ = resp.Body.Close()
+	if got := apiHits.authorization(); got != "Bearer fake-google-token" {
+		t.Errorf("Authorization = %q", got)
 	}
 }
 
@@ -90,7 +87,7 @@ func TestGCPWorkloadIdentityUsesApplicationDefaultCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tok, _, err := GCPTokenSource(c.Credentials).Token(t.Context()); err != nil || tok != "ya29.fake-access-token" {
+	if tok, _, err := GCPTokenSource(c.Credentials).Token(t.Context()); err != nil || tok != "fake-google-token" {
 		t.Errorf("Token = %q, %v", tok, err)
 	}
 }

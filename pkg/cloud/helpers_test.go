@@ -39,6 +39,7 @@ type hits struct {
 	n    atomic.Int32
 	mu   sync.Mutex
 	form map[string][]string
+	authz string
 }
 
 func (h *hits) record(r *http.Request) {
@@ -47,6 +48,7 @@ func (h *hits) record(r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.form = r.Form
+	h.authz = r.Header.Get("Authorization")
 }
 
 func (h *hits) count() int { return int(h.n.Load()) }
@@ -131,4 +133,10 @@ func getErr(c *http.Client, u string) error {
 		_ = resp.Body.Close()
 	}
 	return err
+}
+
+func (h *hits) authorization() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.authz
 }
