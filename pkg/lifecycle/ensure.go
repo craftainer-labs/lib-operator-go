@@ -19,7 +19,12 @@ import (
 //   - Drifted (type, labels, or the type and provider keys were edited): the
 //     metadata is repaired and the other keys are kept, without calling the
 //     backend.
-//   - Missing: the credential values cannot be recovered without the backend,
+//   - Missing, External is a BindingRebuilder (checked before the Rotator
+//     path, so it wins for an External that is both): the data is rebuilt from
+//     the observed state and written, with no credential issued and no Update
+//     policy needed. Only an External whose binding holds no secret implements
+//     it.
+//   - Missing, any other External: the credential values cannot be recovered without the backend,
 //     so the rotate path issues new ones. That needs a Rotator, the Update
 //     management policy and no grace period running (a rotation while one is
 //     running would lose the generation awaiting retirement). Otherwise the
@@ -51,6 +56,23 @@ func (r *run[S, O]) ensureBinding(cur O) (rotationOutcome, error) {
 		return rotationOutcome{}, fmt.Errorf("%w: %s/%s", ErrNameCollision, secret.Namespace, secret.Name)
 	case binding.StateDrifted:
 		return rotationOutcome{}, r.repairMetadata(name, secret)
+	}
+
+	if reb, ok := r.ext.(BindingRebuilder[S, O]); ok {
+		// A binding with no secret in it: rewrite it from the observed state.
+		data, err := reb.RebuildBinding(r.ctx, r.spec, cur)
+		if err != nil {
+			return rotationOutcome{}, fmt.Errorf("RebuildBinding: %w", err)
+		}
+		if len(data) == 0 {
+			return rotationOutcome{}, fmt.Errorf("RebuildBinding: %w", ErrNoBindingData)
+		}
+		if err := r.writeBinding(data); err != nil {
+			return rotationOutcome{}, err
+		}
+		r.event(corev1.EventTypeNormal, conditions.EventBindingRepaired, "Reconcile",
+			"the binding Secret %s was missing and was rebuilt from the observed state", name)
+		return rotationOutcome{}, nil
 	}
 
 	rs := cl.GetRotationStatus()

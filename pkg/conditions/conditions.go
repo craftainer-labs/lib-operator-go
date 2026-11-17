@@ -79,6 +79,7 @@ const (
 	EventRotationFailed         = "RotationFailed"
 	EventRotationDeferred       = "RotationDeferred"
 	EventBindingRepaired        = "BindingRepaired"
+	EventRotationNotApplicable  = "RotationNotApplicable"
 	EventInvalidPollInterval    = "InvalidPollInterval"
 )
 

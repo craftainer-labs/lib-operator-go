@@ -48,6 +48,16 @@ func (r *run[S, O]) rotate(cur O) (rotationOutcome, error) {
 	triggered := trigger != "" && trigger != rs.LastTrigger
 	rot, ok := r.ext.(Rotator[S, O])
 	if !ok {
+		if n, isNon := r.ext.(NonRotator); isNon && n.RotationNotApplicable() {
+			if triggered {
+				rs.LastTrigger = trigger
+				cl.SetRotationStatus(rs)
+				r.event(corev1.EventTypeWarning, conditions.EventRotationNotApplicable, "Rotate",
+					"%s=%q is acknowledged and ignored: rotation does not apply to this credential",
+					AnnotationRotate, trigger)
+			}
+			return rotationOutcome{}, nil
+		}
 		return rotationOutcome{unsupported: policy != nil || triggered}, nil
 	}
 	inGrace := rs.Previous != "" || rs.RetireAfter != nil
