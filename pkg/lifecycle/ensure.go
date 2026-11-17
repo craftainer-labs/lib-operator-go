@@ -19,9 +19,12 @@ import (
 //   - Drifted (type, labels, or the type and provider keys were edited): the
 //     metadata is repaired and the other keys are kept, without calling the
 //     backend.
-//   - Missing, External is a BindingRebuilder: the data is rebuilt from the
-//     observed state and written, with no credential issued.
-//   - Missing otherwise: the credential values cannot be recovered without the backend,
+//   - Missing, External is a BindingRebuilder (checked before the Rotator
+//     path, so it wins for an External that is both): the data is rebuilt from
+//     the observed state and written, with no credential issued and no Update
+//     policy needed. Only an External whose binding holds no secret implements
+//     it.
+//   - Missing, any other External: the credential values cannot be recovered without the backend,
 //     so the rotate path issues new ones. That needs a Rotator, the Update
 //     management policy and no grace period running (a rotation while one is
 //     running would lose the generation awaiting retirement). Otherwise the
