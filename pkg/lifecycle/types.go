@@ -79,7 +79,8 @@ type RotationState struct {
 
 // Rotator is implemented by an External whose backend can rotate credentials
 // (ADR 0002, section 8). An External that is not a Rotator cannot rotate: a
-// claim that sets rotationPolicy gets Synced=False, reason RotationUnsupported.
+// claim that sets rotationPolicy gets Synced=False, reason RotationUnsupported,
+// unless the External is a NonRotator that declares rotation not applicable.
 type Rotator[S, O any] interface {
 	External[S, O]
 	// RotateBegin issues a new generation and leaves the active one valid. It
@@ -89,6 +90,32 @@ type Rotator[S, O any] interface {
 	// RotateFinish retires st.Previous once the grace period has elapsed. It
 	// must succeed when st.Previous is already gone.
 	RotateFinish(ctx context.Context, spec S, cur O, st RotationState) error
+}
+
+// NonRotator is implemented by an External that is not a Rotator because
+// rotation does not apply to its credential (for example a cloud IAM login,
+// which has no secret to rotate), as opposed to a backend that cannot rotate
+// (RotationUnsupported). When RotationNotApplicable returns true, a rotate
+// annotation is acknowledged and recorded in status.rotation.lastTrigger with a
+// Warning Event RotationNotApplicable, and Synced stays True; a rotationPolicy
+// is ignored. A Rotator is never asked: an External that implements Rotator
+// keeps its rotation semantics whatever else it implements.
+type NonRotator interface {
+	RotationNotApplicable() bool
+}
+
+// BindingRebuilder is implemented by an External of a credential kind whose
+// binding Secret holds no secret of its own: its data can be rebuilt from the
+// spec and the observed object without issuing a credential. When the binding
+// Secret is missing, Reconcile writes the data RebuildBinding returns instead of
+// reporting BindingSecretMissing, whether or not the External is a Rotator and
+// without the Update management policy (the backend is not changed). It is
+// not called for a Secret that exists, or in the same reconcile as Create or
+// Update, which already return the data. An External whose binding holds an
+// issued credential must not implement it: the Rotator path recreates that.
+// The data must not be empty (ErrNoBindingData otherwise).
+type BindingRebuilder[S, O any] interface {
+	RebuildBinding(ctx context.Context, spec S, cur O) (binding.Data, error)
 }
 
 // HardCutRotator is implemented by a Rotator for a backend with no overlap:

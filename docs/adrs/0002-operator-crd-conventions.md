@@ -536,6 +536,28 @@ grace period runs makes the reconcile return when the grace period ends (the
 shortest positive requeue wins); once it has ended, the previous generation is
 retired and the Secret is recreated by a rotation in the same reconcile.
 
+Two optional interfaces cover credentials with no secret to rotate (added with
+NKlib-2; section 16.4's IAM mode is the first user). They change nothing for an
+External that does not implement them, and a `Rotator`'s rotation is never
+altered by them:
+
+- `NonRotator` (`RotationNotApplicable() bool`) is for an External that is not
+  a `Rotator` because rotation does not apply. When it returns true, the
+  `craftainer.dev/rotate` annotation is acknowledged (its value is recorded in
+  `status.rotation.lastTrigger`, so it fires once) with a Warning Event
+  `RotationNotApplicable`, a `rotationPolicy` is ignored, and `Synced` stays
+  True. When it returns false, or the interface is absent, the claim gets
+  `Synced=False`, reason `RotationUnsupported`, as before. It is not consulted
+  for a `Rotator`.
+- `BindingRebuilder` (`RebuildBinding(ctx, spec, cur) (binding.Data, error)`)
+  is for an External whose binding Secret holds no secret of its own. When the
+  binding Secret is missing, the lifecycle writes the data it returns (Normal
+  Event `BindingRepaired`) instead of `BindingSecretMissing`, whether or not
+  the External is a `Rotator`, without the `Update` policy and without calling
+  `Create`, `Update` or `RotateBegin`. It is only called for a missing Secret.
+  An External whose Secret holds an issued credential must not implement it:
+  the rotate path recreates that one. Empty data is `ErrNoBindingData`.
+
 Known limits: if marking the Secret fails after its data was written, the next
 reconcile calls `RotateBegin` again and a second credential is issued (closing
 that window needs a `binding` write option that sets annotations, a G-api
@@ -1393,6 +1415,10 @@ the earlier releases changed):
   unchanged and never touch `discovered`.
 - The condition reasons `conditions.CredentialsNamespaceForbidden` and
   `conditions.CredentialsUnavailable`.
+- `lifecycle.NonRotator`, `lifecycle.BindingRebuilder` and the Event
+  `conditions.EventRotationNotApplicable` (NKlib-2): the `RotationNotApplicable`
+  Event of 16.4's IAM mode, and the rebuild of an IAM binding Secret that holds
+  no secret. Section 8 describes them; existing Externals work unchanged.
 
 Not implemented here, left to the operators' NK items:
 
